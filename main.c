@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    while (1) {
+    while (true) {
         // Get a submission queue entry
         sqe = io_uring_get_sqe(&ring);
         if (!sqe) {
