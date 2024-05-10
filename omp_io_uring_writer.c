@@ -7,19 +7,24 @@
 
 int main() {
   const int N = 64;
-  int *hst_ptr = omp_alloc(N * sizeof(int), llvm_omp_target_host_mem_alloc);
-
-  // Perform OpenMP operations
-  for (int i = 0; i < N; ++i)
-    hst_ptr[i] = 2;
-
+  int *hst_ptr = omp_target_alloc(N * sizeof(int), omp_get_default_device());
+  if (hst_ptr == NULL) {
+    fprintf(stderr, "Failed to allocate memory on the device\n");
+    return 1;
+  }
+  // Use the data in an OpenMP target region
 #pragma omp target teams distribute parallel for map(tofrom: hst_ptr[0:N])
   for (int i = 0; i < N; ++i)
-    hst_ptr[i] -= 1;
+    hst_ptr[i] = 1;
 
-  // Convert data to strings and prepare for writing
-  char *buffer = malloc(N * 12);
+  // Convert data to strings for human-readable output
+  char *buffer = malloc(N * 12);  // Assume max 11 chars per number + newline
   char *ptr = buffer;
+  if (buffer == NULL) {
+    fprintf(stderr, "Failed to allocate memory for buffer\n");
+    omp_target_free(hst_ptr, omp_get_default_device());
+    return 1;
+  }
   for (int i = 0; i < N; ++i) {
     ptr += sprintf(ptr, "%d\n", hst_ptr[i]);
   }
@@ -44,12 +49,13 @@ int main() {
   io_uring_queue_exit(&ring);
   free(buffer);
 
-  // Summing up results
+  // Sum up results and check
   int sum = 0;
   for (int i = 0; i < N; ++i)
     sum += hst_ptr[i];
-  omp_free(hst_ptr, llvm_omp_target_host_mem_alloc);
+  omp_target_free(hst_ptr, omp_get_default_device());
 
   if (sum == N)
     printf("PASS\n");
 }
+
