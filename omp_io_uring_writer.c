@@ -18,7 +18,7 @@ int main() {
     hst_ptr[i] -= 1;
 
   // Convert data to strings and prepare for writing
-  char *buffer = malloc(N * 12);  // Assume max 11 chars per number + newline
+  char *buffer = malloc(N * 12);
   char *ptr = buffer;
   for (int i = 0; i < N; ++i) {
     ptr += sprintf(ptr, "%d\n", hst_ptr[i]);
