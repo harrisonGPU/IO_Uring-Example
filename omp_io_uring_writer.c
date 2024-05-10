@@ -18,7 +18,7 @@ int main() {
     hst_ptr[i] = 1;
 
   // Convert data to strings for human-readable output
-  char *buffer = malloc(N * 12);  // Assume max 11 chars per number + newline
+  char *buffer = omp_target_alloc(N * 12, omp_get_default_device());
   char *ptr = buffer;
   if (buffer == NULL) {
     fprintf(stderr, "Failed to allocate memory for buffer\n");
