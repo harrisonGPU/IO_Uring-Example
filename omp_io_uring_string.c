@@ -12,7 +12,7 @@ int main() {
     int device_id = omp_get_default_device();
 
     // Allocate memory accessible by the host (CPU)
-    char *buffer = omp_target_alloc(message_len, device_id);
+    char *buffer = omp_alloc(message_len, llvm_omp_target_host_mem_alloc);
     if (buffer == NULL) {
         fprintf(stderr, "Failed to allocate memory on the target device\n");
         return 1;
@@ -50,7 +50,7 @@ int main() {
     // Clean up
     close(fd);
     io_uring_queue_exit(&ring);
-    omp_target_free(buffer, device_id);
+    omp_free(buffer, llvm_omp_target_host_mem_alloc);
 
     return 0;
 }
