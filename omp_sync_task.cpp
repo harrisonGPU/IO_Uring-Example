@@ -1,38 +1,42 @@
 #include <iostream>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <omp.h>
 #include <liburing.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <atomic>
 
-// Flag to indicate when GPU has finished processing
-std::atomic<bool> work_ready(false);
+// Global atomic counter for unique file naming
+std::atomic<int> file_counter(0);
 
+template<typename T>
 class GPUOperations {
 public:
-    void perform(int* shared_ptr, int size) {
-        // Simulate task submission by GPU
-        std::cout << "GPU submitting work..." << std::endl;
-        #pragma omp target teams distribute parallel for is_device_ptr(shared_ptr)
-        for (int i = 0; i < size; ++i) {
-            shared_ptr[i] = 1;  // Perform the GPU work
+    void perform(T shared_ptr, int size, int num_teams, int num_threads_per_team) {
+        // Use OpenMP to allocate memory and distribute the workload across multiple GPU threads
+        #pragma omp target teams distribute parallel for collapse(2) num_teams(num_teams) thread_limit(num_threads_per_team) map(tofrom: shared_ptr[:size])
+        for (int team = 0; team < num_teams; ++team) {
+            for (int thread = 0; thread < num_threads_per_team; ++thread) {
+                int index = team * num_threads_per_team + thread;
+                if (index < size) {
+                    shared_ptr[index] = 1; // Each thread sets its designated element to 1
+                }
+            }
         }
-        work_ready = true;  // Indicate work is ready for the CPU to process
     }
 };
 
+template<typename T>
 class CPUOperations {
 public:
-    void process(int* shared_ptr, int size) {
-        // Wait until work is ready
-        while (!work_ready) {
-            // Busy-waiting; in a real application, consider using condition variables instead
-        }
+    void process(T shared_ptr, int size) {
+        int file_number = file_counter.fetch_add(1);
+        pid_t pid = getpid();
+        char filename[256];
+        snprintf(filename, sizeof(filename), "output_%d_%d.bin", pid, file_number);
 
-        std::cout << "CPU processing work..." << std::endl;
-        int fd = open("output.bin", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) {
             perror("Failed to open file");
             return;
@@ -54,7 +58,7 @@ public:
         if (cqe->res < 0) {
             fprintf(stderr, "io_uring write failed: %s\n", strerror(-cqe->res));
         } else {
-            std::cout << "Write completed successfully\n";
+            std::cout << "Write to " << filename << " completed successfully\n";
         }
         io_uring_cqe_seen(&ring, cqe);
 
@@ -65,24 +69,25 @@ public:
 
 int main() {
     const int BUFFER_SIZE = 1024;
-    int input = 0;
-    auto shared_ptr = static_cast<int*>(omp_alloc(BUFFER_SIZE * sizeof(int), llvm_omp_target_shared_mem_alloc));
-    
-    GPUOperations gpuOps;
-    CPUOperations cpuOps;
+    const int NUM_TEAMS = 4;
+    const int THREADS_PER_TEAM = 64;
 
+    auto shared_ptr = static_cast<int*>(omp_alloc(BUFFER_SIZE * sizeof(int), llvm_omp_target_shared_mem_alloc));
+
+    GPUOperations<int*> gpuOps;
+    CPUOperations<int*> cpuOps;
+
+    int command = 0;
     while (true) {
         std::cout << "Enter 1 to perform operations, any other number to exit: ";
-        std::cin >> input;
+        std::cin >> command;
 
-        if (input == 1) {
-            // Allocate memory on GPU
-            gpuOps.perform(shared_ptr, BUFFER_SIZE);
-            // Write buffer date to file
+        if (command == 1) {
+            gpuOps.perform(shared_ptr, BUFFER_SIZE, NUM_TEAMS, THREADS_PER_TEAM);
             cpuOps.process(shared_ptr, BUFFER_SIZE);
         } else {
-            std::cout << "GPU First!\n";
-            break; // Exit the loop and end the program
+            std::cout << "Exiting program." << std::endl;
+            break;
         }
     }
 
