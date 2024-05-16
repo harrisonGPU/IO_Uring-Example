@@ -25,6 +25,14 @@ public:
             }
         }
     }
+
+    void increment(T shared_ptr, int size) {
+        // Use OpenMP to increment the data on the GPU
+        #pragma omp target teams distribute parallel for map(tofrom: shared_ptr[:size])
+        for (int i = 0; i < size; ++i) {
+            shared_ptr[i] += 1; // Increment each element by 1
+        }
+    }
 };
 
 template<typename T>
@@ -65,6 +73,46 @@ public:
         close(fd);
         io_uring_queue_exit(&ring);
     }
+
+    void readAndModify(T shared_ptr, int size, const char* file_path) {
+        int fd = open(file_path, O_RDONLY);
+        if (fd < 0) {
+            perror("Failed to open file for reading");
+            return;
+        }
+
+        struct io_uring ring;
+        if (io_uring_queue_init(8, &ring, 0) != 0) {
+            fprintf(stderr, "io_uring setup failed for reading\n");
+            close(fd);
+            return;
+        }
+
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+        io_uring_prep_read(sqe, fd, shared_ptr, size * sizeof(int), 0);
+        io_uring_submit(&ring);
+
+        struct io_uring_cqe *cqe;
+        io_uring_wait_cqe(&ring, &cqe);
+        if (cqe->res < 0) {
+            fprintf(stderr, "io_uring read failed: %s\n", strerror(-cqe->res));
+        } else {
+            std::cout << "Read from " << file_path << " completed successfully. Modifying data...\n";
+            // Call GPU to increment the data
+            GPUOperations<T> gpuOps;
+            gpuOps.increment(shared_ptr, size);
+
+            // Print the incremented data
+            for (int i = 0; i < size; ++i) {
+                std::cout << shared_ptr[i] << " ";
+            }
+            std::cout << std::endl;
+        }
+        io_uring_cqe_seen(&ring, cqe);
+
+        close(fd);
+        io_uring_queue_exit(&ring);
+    }
 };
 
 int main() {
@@ -79,12 +127,15 @@ int main() {
 
     int command = 0;
     while (true) {
-        std::cout << "Enter 1 to perform operations, any other number to exit: ";
+        std::cout << "Enter 1 to perform operations, 2 to read from file and modify data, any other number to exit: ";
         std::cin >> command;
 
         if (command == 1) {
             gpuOps.perform(shared_ptr, BUFFER_SIZE, NUM_TEAMS, THREADS_PER_TEAM);
             cpuOps.process(shared_ptr, BUFFER_SIZE);
+        } else if (command == 2) {
+            // Ensure to replace "output.bin" with the path to the actual file you want to read from
+            cpuOps.readAndModify(shared_ptr, BUFFER_SIZE, "output_4602_0.bin");
         } else {
             std::cout << "Exiting program." << std::endl;
             break;
