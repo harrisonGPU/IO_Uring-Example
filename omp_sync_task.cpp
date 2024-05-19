@@ -11,8 +11,8 @@
 
 template <typename T> class GPUOperations {
 public:
-  void perform(T shared_ptr, int size, int num_teams, int num_threads_per_team,
-               std::atomic<int> &file_counter) {
+  void perform(T shared_ptr, int size, int num_teams,
+               int num_threads_per_team, std::atomic<int> &file_counter) {
 // Use OpenMP to allocate memory and distribute the workload across multiple GPU
 // threads
 #pragma omp target teams distribute parallel for collapse(2)                   \
@@ -46,12 +46,10 @@ public:
 template <typename T> class IOOperations {
 public:
   void process(T shared_ptr, int size, std::atomic<int> &file_counter);
-  void readAndModify(T shared_ptr, int size, const char *file_path);
+  void readAndModify(T shared_ptr, int size, const char* file_path);
 };
 
-template <typename T>
-void IOOperations<T>::process(T shared_ptr, int size,
-                              std::atomic<int> &file_counter) {
+template <typename T> void IOOperations<T>::process(T shared_ptr, int size, std::atomic<int> &file_counter) {
   int file_number = file_counter.fetch_add(1);
   pid_t pid = getpid();
   char filename[256];
@@ -87,9 +85,9 @@ void IOOperations<T>::process(T shared_ptr, int size,
   io_uring_queue_exit(&ring);
 }
 
-template <typename T>
-void IOOperations<T>::readAndModify(T shared_ptr, int size,
-                                    const char *file_path) {
+template<typename T>
+void IOOperations<T>::readAndModify(T shared_ptr, int size, const char*
+file_path) {
   int fd = open(file_path, O_RDONLY);
   if (fd < 0) {
     perror("Failed to open file for reading");
@@ -132,11 +130,12 @@ void IOOperations<T>::readAndModify(T shared_ptr, int size,
 
 #pragma omp end declare target
 template <typename T>
-void GPUOperations<T>::call_io_function(T shared_ptr, int size,
-                                        std::atomic<int> &file_counter) {
+void GPUOperations<T>::call_io_function(T shared_ptr, int size, std::atomic<int> &file_counter) {
   IOOperations<T> ioOps;
   ioOps.process(shared_ptr, size, file_counter);
 }
+
+
 
 int main() {
   const int BUFFER_SIZE = 1024;
@@ -157,14 +156,15 @@ int main() {
     std::cin >> command;
 
     if (command == 1) {
-      gpuOps.perform(shared_ptr, BUFFER_SIZE, NUM_TEAMS, THREADS_PER_TEAM,
-                     file_counter);
-    } else if (command == 2) {
-      // Ensure to replace "output.bin" with the path to the actual file
-      // you want to read from
-      IOOperations<int *> ioOps;
-      ioOps.readAndModify(shared_ptr, BUFFER_SIZE, "output_4380_0.bin");
-    } else {
+      gpuOps.perform(shared_ptr, BUFFER_SIZE, NUM_TEAMS, THREADS_PER_TEAM, file_counter);
+    }
+    else if (command == 2) {
+        // Ensure to replace "output.bin" with the path to the actual file
+        // you want to read from 
+        IOOperations<int*> ioOps;
+        ioOps.readAndModify(shared_ptr, BUFFER_SIZE, "output_4380_0.bin");
+    }
+    else {
       std::cout << "Exiting program." << std::endl;
       break;
     }
