@@ -36,7 +36,7 @@ public:
 };
 
 template<typename T>
-class CPUOperations {
+class IOOperations {
 public:
     void process(T shared_ptr, int size) {
         int file_number = file_counter.fetch_add(1);
@@ -123,7 +123,7 @@ int main() {
     auto shared_ptr = static_cast<int*>(omp_alloc(BUFFER_SIZE * sizeof(int), llvm_omp_target_shared_mem_alloc));
 
     GPUOperations<int*> gpuOps;
-    CPUOperations<int*> cpuOps;
+    IOOperations<int*> ioOps;
 
     int command = 0;
     while (true) {
@@ -132,10 +132,10 @@ int main() {
 
         if (command == 1) {
             gpuOps.perform(shared_ptr, BUFFER_SIZE, NUM_TEAMS, THREADS_PER_TEAM);
-            cpuOps.process(shared_ptr, BUFFER_SIZE);
+            ioOps.process(shared_ptr, BUFFER_SIZE);
         } else if (command == 2) {
             // Ensure to replace "output.bin" with the path to the actual file you want to read from
-            cpuOps.readAndModify(shared_ptr, BUFFER_SIZE, "output_4602_0.bin");
+            ioOps.readAndModify(shared_ptr, BUFFER_SIZE, "output_4602_0.bin");
         } else {
             std::cout << "Exiting program." << std::endl;
             break;
