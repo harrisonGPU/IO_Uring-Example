@@ -7,8 +7,6 @@
 #include <omp.h>
 #include <unistd.h>
 
-// Global atomic counter for unique file naming
-
 template <typename T> class GPUOperations {
 public:
   void perform(T shared_ptr, int size, int num_teams,
@@ -27,7 +25,7 @@ public:
       }
     }
     
-    call_io_function(shared_ptr, size, file_counter);
+    submit_io_task(shared_ptr, size, file_counter);
   }
 
   void increment(T shared_ptr, int size) {
@@ -40,7 +38,7 @@ public:
   }
 
 #pragma omp declare target
-  void call_io_function(T shared_ptr, int size, std::atomic<int> &file_counter);
+  void submit_io_task(T shared_ptr, int size, std::atomic<int> &file_counter);
 };
 
 template <typename T> class IOOperations {
@@ -130,7 +128,7 @@ file_path) {
 
 #pragma omp end declare target
 template <typename T>
-void GPUOperations<T>::call_io_function(T shared_ptr, int size, std::atomic<int> &file_counter) {
+void GPUOperations<T>::submit_io_task(T shared_ptr, int size, std::atomic<int> &file_counter) {
   IOOperations<T> ioOps;
   ioOps.process(shared_ptr, size, file_counter);
 }
