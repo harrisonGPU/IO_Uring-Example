@@ -252,6 +252,40 @@ void read_from_cq(struct submitter *s) {
     write_barrier();
 }
 
+int submit_write_request(const char *file_path, const char *data, size_t data_size, struct submitter *s) {
+    int file_fd = open(file_path, O_WRONLY | O_CREAT, 0644);
+    if (file_fd < 0) {
+        perror("open");
+        return 1;
+    }
+
+    struct app_io_sq_ring *sring = &s->sq_ring;
+    unsigned tail = *sring->tail;
+    unsigned index = tail & *sring->ring_mask;
+    struct io_uring_sqe *sqe = &s->sqes[index];
+
+    sqe->fd = file_fd;
+    sqe->opcode = IORING_OP_WRITEV;
+    sqe->flags = 0;
+    sqe->off = 0;
+    sqe->addr = (unsigned long) &((struct iovec){.iov_base = (void *)data, .iov_len = data_size});
+    sqe->len = 1; // Number of iovec structures
+    sqe->user_data = (unsigned long long) file_fd;
+
+    *sring->tail = tail + 1;
+    write_barrier();
+
+    // Notify the kernel and wait for at least one event to complete
+    if (io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_GETEVENTS) < 0) {
+        perror("io_uring_enter");
+        close(file_fd);
+        return 1;
+    }
+
+    close(file_fd);
+    return 0;
+}
+
 /*
  * This function submits requests to the submission queue. The specific type of
  * request used here is readv(), designated by IORING_OP_READV, which allows for
@@ -347,31 +381,57 @@ int submit_to_sq(char *file_path, struct submitter *s) {
 }
 
 int main(int argc, char *argv[]) {
-    struct submitter *s;
+    struct submitter *uring_submitter;
+    int user_command = 0;
 
+    // Ensure the correct command line usage
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return 1;
     }
 
-    s = malloc(sizeof(*s));
-    if (!s) {
-        perror("malloc");
+    // Allocate memory for the io_uring submitter structure
+    uring_submitter = malloc(sizeof(*uring_submitter));
+    if (!uring_submitter) {
+        perror("Failed to allocate memory for io_uring setup");
         return 1;
     }
-    memset(s, 0, sizeof(*s));
+    memset(uring_submitter, 0, sizeof(*uring_submitter));
 
-    if(app_setup_uring(s)) {
-        fprintf(stderr, "Unable to setup uring!\n");
+    // Set up io_uring structures and verify setup success
+    if (app_setup_uring(uring_submitter)) {
+        fprintf(stderr, "Failed to setup io_uring.\n");
         return 1;
     }
 
-    for (int i = 1; i < argc; i++) {
-        if(submit_to_sq(argv[i], s)) {
-            fprintf(stderr, "Error reading file\n");
+    // Prompt user for operation type: write (1) or read (2)
+    printf("Enter command (1 for write, 2 for read): ");
+    scanf("%d", &user_command);
+
+    if (user_command == 1) {
+        const char *file_path = argv[1];
+        const char *data_to_write = "Hello, GPU first";
+        size_t data_length = strlen(data_to_write);
+
+        // Submit a write request
+        if (submit_write_request(file_path, data_to_write, data_length, uring_submitter)) {
+            fprintf(stderr, "Error writing to file: %s\n", file_path);
             return 1;
         }
-        read_from_cq(s);
+
+        printf("Data successfully written to %s.\n", file_path);
+    } else if (user_command == 2) {
+        // Loop through all provided files and read them
+        for (int i = 1; i < argc; i++) {
+            if (submit_to_sq(argv[i], uring_submitter)) {
+                fprintf(stderr, "Error reading file: %s\n", argv[i]);
+                return 1;
+            }
+            read_from_cq(uring_submitter);
+        }
+    } else {
+        fprintf(stderr, "Invalid command. Please enter 1 for write or 2 for read.\n");
+        return 1;
     }
 
     return 0;
