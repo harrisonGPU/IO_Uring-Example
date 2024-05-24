@@ -441,7 +441,7 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
 
-            // usleep(1000);
+            usleep(1000);
             read_from_cq(uring_submitter);
         }
     } else {
