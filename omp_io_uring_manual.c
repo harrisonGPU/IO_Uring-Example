@@ -117,6 +117,9 @@ int app_setup_uring(struct submitter *s) {
      */
 
     memset(&params, 0, sizeof(params));
+    params.flags = IORING_SETUP_SQPOLL; 
+    params.sq_thread_idle = 1000; 
+
     s->ring_fd = io_uring_setup(QUEUE_DEPTH, &params);
     if (s->ring_fd < 0) {
         perror("io_uring_setup");
@@ -223,7 +226,10 @@ void read_from_cq(struct submitter *s) {
     unsigned head, reaped = 0;
 
     head = *cring->head;
+    printf("Reading from completion queue...\n");
 
+    if (head == *cring->tail)
+        printf("Ring buffer is empty.\n");
     do {
         read_barrier();
         /*
@@ -238,7 +244,9 @@ void read_from_cq(struct submitter *s) {
         fi = (struct file_info*) cqe->user_data;
         if (cqe->res < 0)
             fprintf(stderr, "Error: %s\n", strerror(abs(cqe->res)));
-
+        else
+            printf("Operation completed successfully, result: %d\n", cqe->res);
+        
         int blocks = (int) fi->file_sz / BLOCK_SZ;
         if (fi->file_sz % BLOCK_SZ) blocks++;
 
@@ -296,9 +304,11 @@ int submit_to_sq(char *file_path, struct submitter *s) {
 
     int file_fd = open(file_path, O_RDONLY);
     if (file_fd < 0 ) {
-        perror("open");
+        perror("Error opening file.");
         return 1;
     }
+
+    printf("File opened successfully: %s\n", file_path);
 
     struct app_io_sq_ring *sring = &s->sq_ring;
     unsigned index = 0, current_block = 0, tail = 0, next_tail = 0;
@@ -370,12 +380,14 @@ int submit_to_sq(char *file_path, struct submitter *s) {
      * number of events (third parameter, min_complete) have been completed.
      */
 
-    int ret =  io_uring_enter(s->ring_fd, 1,1,
-            IORING_ENTER_GETEVENTS);
+    printf("Submitting read request for file: %s\n", file_path);
+    int ret =  io_uring_enter(s->ring_fd, 1,0,
+            IORING_ENTER_SQ_WAKEUP);
     if(ret < 0) {
         perror("io_uring_enter");
         return 1;
     }
+    printf("io_uring_enter submitted successfully.\n");
 
     return 0;
 }
@@ -406,6 +418,7 @@ int main(int argc, char *argv[]) {
 
     // Prompt user for operation type: write (1) or read (2)
     printf("Enter command (1 for write, 2 for read): ");
+    fflush(stdout);
     scanf("%d", &user_command);
 
     if (user_command == 1) {
@@ -427,6 +440,8 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error reading file: %s\n", argv[i]);
                 return 1;
             }
+
+            // usleep(1000);
             read_from_cq(uring_submitter);
         }
     } else {
