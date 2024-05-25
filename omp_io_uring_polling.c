@@ -160,6 +160,41 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // Get an SQE (Submission Queue Entry) for polling
+    sqe = &s.sqes[*s.sq_ring.tail & *s.sq_ring.ring_mask];
+    io_uring_prep_poll_add(sqe, fd, POLLIN);
+
+    // Update the tail for polling
+    *s.sq_ring.tail += 1;
+    // Submit the polling request
+    printf("Submitting poll request...\n");
+    ret = io_uring_enter(s.ring_fd, 1, 0, IORING_ENTER_GETEVENTS);
+    if (ret < 0) {
+        perror("Submit the polling request fail.");
+        close(fd);
+        return 1;
+    }
+    printf("Submitted poll request successful.\n");
+
+    // Wait for the poll completion
+    printf("Waiting for poll completion...\n");
+    while (*s.cq_ring.head == *s.cq_ring.tail) {
+        usleep(1000);
+    }
+    printf("Waiting for poll completion successful.\n");
+
+
+    // Get the CQE (Completion Queue Entry) for polling
+    cqe = &s.cq_ring.cqes[*s.cq_ring.head & *s.cq_ring.ring_mask];
+    if (cqe->res < 0) {
+        fprintf(stderr, "CQE for polling failed: %d\n", cqe->res);
+        close(fd);
+        return 1;
+    }
+
+    // Mark the CQE as seen for polling
+    *s.cq_ring.head += 1;
+
     // Get an SQE (Submission Queue Entry) for reading the file
     sqe = &s.sqes[*s.sq_ring.tail & *s.sq_ring.ring_mask];
     io_uring_prep_read(sqe, fd, buffer, BUFFER_SIZE - 1, 0);
@@ -182,13 +217,13 @@ int main(int argc, char *argv[])
     while (*s.cq_ring.head == *s.cq_ring.tail) {
         usleep(1000);
     }
-
+    printf("Waiting for completion successful.\n");
     // Get the CQE (Completion Queue Entry)
     cqe = &s.cq_ring.cqes[*s.cq_ring.head & *s.cq_ring.ring_mask];
 
     // Check the result
     if (cqe->res < 0) {
-        fprintf(stderr, "read failed: %d\n", cqe->res);
+        fprintf(stderr, "Check the result read failed: %d\n", cqe->res);
         close(fd);
         return 1;
     }
