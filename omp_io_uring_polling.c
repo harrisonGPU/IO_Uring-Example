@@ -133,42 +133,35 @@ void io_uring_prep_read(struct io_uring_sqe *sqe, int fd, void *buf, unsigned nb
     sqe->off = offset;
 }
 
-int main(int argc, char *argv[])
-{
-    struct submitter s;
+int handle_io_uring(struct submitter *s, const char *file_path) {
     struct io_uring_cqe *cqe;
     struct io_uring_sqe *sqe;
     char buffer[BUFFER_SIZE];
     int ret, fd;
 
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
-        return 1;
-    }
-
     // Open the file for reading
-    fd = open(argv[1], O_RDONLY);
+    fd = open(file_path, O_RDONLY);
     if (fd < 0) {
         perror("open");
         return 1;
     }
 
     // Setup io_uring
-    if (app_setup_uring(&s)) {
+    if (app_setup_uring(s)) {
         fprintf(stderr, "Failed to setup io_uring.\n");
         close(fd);
         return 1;
     }
 
     // Get an SQE (Submission Queue Entry) for polling
-    sqe = &s.sqes[*s.sq_ring.tail & *s.sq_ring.ring_mask];
+    sqe = &s->sqes[*s->sq_ring.tail & *s->sq_ring.ring_mask];
     io_uring_prep_poll_add(sqe, fd, POLLIN);
 
     // Update the tail for polling
-    *s.sq_ring.tail += 1;
+    *s->sq_ring.tail += 1;
     // Submit the polling request
     printf("Submitting poll request...\n");
-    ret = io_uring_enter(s.ring_fd, 1, 0, IORING_ENTER_GETEVENTS);
+    ret = io_uring_enter(s->ring_fd, 1, 0, IORING_ENTER_GETEVENTS);
     if (ret < 0) {
         perror("Submit the polling request fail.");
         close(fd);
@@ -178,14 +171,13 @@ int main(int argc, char *argv[])
 
     // Wait for the poll completion
     printf("Waiting for poll completion...\n");
-    while (*s.cq_ring.head == *s.cq_ring.tail) {
+    while (*s->cq_ring.head == *s->cq_ring.tail) {
         usleep(1000);
     }
     printf("Waiting for poll completion successful.\n");
 
-
     // Get the CQE (Completion Queue Entry) for polling
-    cqe = &s.cq_ring.cqes[*s.cq_ring.head & *s.cq_ring.ring_mask];
+    cqe = &s->cq_ring.cqes[*s->cq_ring.head & *s->cq_ring.ring_mask];
     if (cqe->res < 0) {
         fprintf(stderr, "CQE for polling failed: %d\n", cqe->res);
         close(fd);
@@ -193,18 +185,18 @@ int main(int argc, char *argv[])
     }
 
     // Mark the CQE as seen for polling
-    *s.cq_ring.head += 1;
+    *s->cq_ring.head += 1;
 
     // Get an SQE (Submission Queue Entry) for reading the file
-    sqe = &s.sqes[*s.sq_ring.tail & *s.sq_ring.ring_mask];
+    sqe = &s->sqes[*s->sq_ring.tail & *s->sq_ring.ring_mask];
     io_uring_prep_read(sqe, fd, buffer, BUFFER_SIZE - 1, 0);
 
     // Update the tail
-    *s.sq_ring.tail += 1;
+    *s->sq_ring.tail += 1;
 
     // Submit the request
     printf("Submitting read request...\n");
-    ret = io_uring_enter(s.ring_fd, 1, 0, IORING_ENTER_GETEVENTS);
+    ret = io_uring_enter(s->ring_fd, 1, 0, IORING_ENTER_GETEVENTS);
     if (ret < 0) {
         perror("io_uring_enter");
         close(fd);
@@ -214,12 +206,12 @@ int main(int argc, char *argv[])
 
     // Wait for completion
     printf("Waiting for completion...\n");
-    while (*s.cq_ring.head == *s.cq_ring.tail) {
+    while (*s->cq_ring.head == *s->cq_ring.tail) {
         usleep(1000);
     }
     printf("Waiting for completion successful.\n");
     // Get the CQE (Completion Queue Entry)
-    cqe = &s.cq_ring.cqes[*s.cq_ring.head & *s.cq_ring.ring_mask];
+    cqe = &s->cq_ring.cqes[*s->cq_ring.head & *s->cq_ring.ring_mask];
 
     // Check the result
     if (cqe->res < 0) {
@@ -233,13 +225,32 @@ int main(int argc, char *argv[])
     printf("File content: %s\n", buffer);
 
     // Mark the CQE as seen
-    *s.cq_ring.head += 1;
+    *s->cq_ring.head += 1;
 
     // Cleanup
     close(fd);
-    close(s.ring_fd);
-    munmap(s.sq_ring.head, s.sring_sz);
-    munmap(s.cq_ring.head, s.cring_sz);
+    close(s->ring_fd);
+    munmap(s->sq_ring.head, s->sring_sz);
+    munmap(s->cq_ring.head, s->cring_sz);
 
     return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        return 1;
+    }
+
+    struct submitter *s = (struct submitter *)malloc(sizeof(struct submitter));
+    if (s == NULL) {
+        fprintf(stderr, "Failed to allocate memory for submitter.\n");
+        return 1;
+    }
+
+    int ret = handle_io_uring(s, argv[1]);
+
+    free(s);
+    return ret;
 }
