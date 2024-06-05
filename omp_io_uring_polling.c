@@ -49,8 +49,8 @@ int app_setup_uring(struct submitter *s) {
     void *sq_ptr, *cq_ptr;
 
     memset(&params, 0, sizeof(params));
-    params.flags = IORING_SETUP_SQPOLL;  // 确保设置了 SQ Polling 模式
-    params.sq_thread_idle = 2000;        // 设置轮询线程的空闲时间
+    params.flags = IORING_SETUP_SQPOLL;  // Ensure SQ Polling mode is set
+    params.sq_thread_idle = 2000;        // Set idle time for polling thread
 
     s->ring_fd = io_uring_setup(QUEUE_DEPTH, &params);
     if (s->ring_fd < 0) {
@@ -137,7 +137,7 @@ int handle_io_uring(struct submitter *s, int fd) {
     // Print debug information
     printf("Submitted read request: fd=%d, tail=%u, index=%u\n", fd, tail, index);
 
-    // 无需显式调用 io_uring_enter，内核线程会自动处理提交队列中的请求
+    // No need to explicitly call io_uring_enter, the kernel thread will automatically handle the requests in the submission queue
 
     // Wait for completion
     while (*s->cq_ring.head == *s->cq_ring.tail) {
