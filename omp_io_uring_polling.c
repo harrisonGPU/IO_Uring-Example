@@ -1,219 +1,192 @@
-#include <errno.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <poll.h>
-#include <sys/syscall.h>
-#include <linux/io_uring.h>
-#include <sys/mman.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <liburing.h>
+#include <stdlib.h>
+#include <unistd.h>
 
-#define QUEUE_DEPTH 8
-#define BUFFER_SIZE 1024
+#define QUEUE_DEPTH 16
+#define BLOCK_SZ    1024
+bool sqpoll;
 
-struct app_io_sq_ring {
-    unsigned *head;
-    unsigned *tail;
-    unsigned *ring_mask;
-    unsigned *ring_entries;
-    unsigned *flags;
-    unsigned *array;
+struct file_info {
+    off_t file_sz;
+    struct iovec iovecs[];      /* Referred by readv/writev */
 };
 
-struct app_io_cq_ring {
-    unsigned *head;
-    unsigned *tail;
-    unsigned *ring_mask;
-    unsigned *ring_entries;
-    struct io_uring_cqe *cqes;
-};
+/*
+* Returns the size of the file whose open file descriptor is passed in.
+* Properly handles regular file and block devices as well. Pretty.
+* */
 
-struct submitter {
-    int ring_fd;
-    struct app_io_sq_ring sq_ring;
-    struct io_uring_sqe *sqes;
-    struct app_io_cq_ring cq_ring;
-    int sring_sz;
-    int cring_sz;
-};
+off_t get_file_size(int fd) {
+    struct stat st;
 
-int io_uring_setup(unsigned entries, struct io_uring_params *params) {
-    return (int) syscall(__NR_io_uring_setup, entries, params);
+    if(fstat(fd, &st) < 0) {
+        perror("fstat");
+        return -1;
+    }
+    if (S_ISBLK(st.st_mode)) {
+        unsigned long long bytes;
+        if (ioctl(fd, BLKGETSIZE64, &bytes) != 0) {
+            perror("ioctl");
+            return -1;
+        }
+        return bytes;
+    } else if (S_ISREG(st.st_mode))
+        return st.st_size;
+
+    return -1;
 }
 
-int app_setup_uring(struct submitter *s) {
-    struct app_io_sq_ring *sring = &s->sq_ring;
-    struct app_io_cq_ring *cring = &s->cq_ring;
-    struct io_uring_params params;
-    void *sq_ptr, *cq_ptr;
+/*
+ * Output a string of characters of len length to stdout.
+ * We use buffered output here to be efficient,
+ * since we need to output character-by-character.
+ * */
+void output_to_console(char *buf, int len) {
+    while (len--) {
+        fputc(*buf++, stdout);
+    }
+}
 
-    memset(&params, 0, sizeof(params));
-    params.flags = IORING_SETUP_SQPOLL;  // Ensure SQ Polling mode is set
-    params.sq_thread_idle = 2000;        // Set idle time for polling thread
+/*
+ * Wait for a completion to be available, fetch the data from
+ * the readv operation and print it to the console.
+ * */
 
-    s->ring_fd = io_uring_setup(QUEUE_DEPTH, &params);
-    if (s->ring_fd < 0) {
-        perror("io_uring_setup");
+int get_completion_and_print(struct io_uring *ring) {
+    struct io_uring_cqe *cqe;
+    int ret = io_uring_wait_cqe(ring, &cqe);
+    if (ret < 0) {
+        perror("io_uring_wait_cqe");
         return 1;
     }
-
-    s->sring_sz = params.sq_off.array + params.sq_entries * sizeof(unsigned);
-    s->cring_sz = params.cq_off.cqes + params.cq_entries * sizeof(struct io_uring_cqe);
-
-    if (params.features & IORING_FEAT_SINGLE_MMAP) {
-        if (s->cring_sz > s->sring_sz) {
-            s->sring_sz = s->cring_sz;
-        }
-        s->cring_sz = s->sring_sz;
-    }
-
-    sq_ptr = mmap(0, s->sring_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, s->ring_fd, IORING_OFF_SQ_RING);
-    if (sq_ptr == MAP_FAILED) {
-        perror("mmap");
+    if (cqe->res < 0) {
+        fprintf(stderr, "Async readv failed.\n");
         return 1;
     }
+    struct file_info *fi = io_uring_cqe_get_data(cqe);
+    int blocks = (int) fi->file_sz / BLOCK_SZ;
+    if (fi->file_sz % BLOCK_SZ) blocks++;
+    for (int i = 0; i < blocks; i ++)
+        output_to_console(fi->iovecs[i].iov_base, fi->iovecs[i].iov_len);
 
-    if (params.features & IORING_FEAT_SINGLE_MMAP) {
-        cq_ptr = sq_ptr;
-    } else {
-        cq_ptr = mmap(0, s->cring_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, s->ring_fd, IORING_OFF_CQ_RING);
-        if (cq_ptr == MAP_FAILED) {
-            perror("mmap");
-            return 1;
-        }
-    }
-
-    sring->head = sq_ptr + params.sq_off.head;
-    sring->tail = sq_ptr + params.sq_off.tail;
-    sring->ring_mask = sq_ptr + params.sq_off.ring_mask;
-    sring->ring_entries = sq_ptr + params.sq_off.ring_entries;
-    sring->flags = sq_ptr + params.sq_off.flags;
-    sring->array = sq_ptr + params.sq_off.array;
-
-    s->sqes = mmap(0, params.sq_entries * sizeof(struct io_uring_sqe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, s->ring_fd, IORING_OFF_SQES);
-    if (s->sqes == MAP_FAILED) {
-        perror("mmap");
-        return 1;
-    }
-
-    cring->head = cq_ptr + params.cq_off.head;
-    cring->tail = cq_ptr + params.cq_off.tail;
-    cring->ring_mask = cq_ptr + params.cq_off.ring_mask;
-    cring->ring_entries = cq_ptr + params.cq_off.ring_entries;
-    cring->cqes = cq_ptr + params.cq_off.cqes;
-
-    // Print debug information
-    printf("io_uring setup completed\n");
-
+    io_uring_cqe_seen(ring, cqe);
     return 0;
 }
 
-void io_uring_prep_read(struct io_uring_sqe *sqe, int fd, void *buf, unsigned nbytes, off_t offset) {
-    memset(sqe, 0, sizeof(*sqe));
-    sqe->opcode = IORING_OP_READ;
-    sqe->fd = fd;
-    sqe->addr = (unsigned long) buf;
-    sqe->len = nbytes;
-    sqe->off = offset;
-}
+/*
+ * Submit the readv request via liburing
+ * */
 
-int handle_io_uring(struct submitter *s, int fd) {
-    struct io_uring_cqe *cqe;
-    struct io_uring_sqe *sqe;
-    char buffer[BUFFER_SIZE];
-
-    // Get an SQE (Submission Queue Entry) for reading the file
-    sqe = &s->sqes[*s->sq_ring.tail & *s->sq_ring.ring_mask];
-    io_uring_prep_read(sqe, fd, buffer, BUFFER_SIZE, 0);
-
-    // Update the tail and array
-    unsigned tail = *s->sq_ring.tail;
-    unsigned index = tail & *s->sq_ring.ring_mask;
-    s->sq_ring.array[index] = tail;
-
-    *s->sq_ring.tail = tail + 1;
-
-    // Print debug information
-    printf("Submitted read request: fd=%d, tail=%u, index=%u\n", fd, tail, index);
-
-    // No need to explicitly call io_uring_enter, the kernel thread will automatically handle the requests in the submission queue
-
-    // Wait for completion
-    while (*s->cq_ring.head == *s->cq_ring.tail) {
-        usleep(1000);
-    }
-
-    // Get the CQE (Completion Queue Entry)
-    cqe = &s->cq_ring.cqes[*s->cq_ring.head & *s->cq_ring.ring_mask];
-
-    // Check the result
-    if (cqe->res < 0) {
-        fprintf(stderr, "Read failed: %d\n", cqe->res);
+int submit_read_request(char *file_path, struct io_uring *ring) {
+    int file_fd = open(file_path, O_RDONLY);
+    if (file_fd < 0) {
+        perror("open");
         return 1;
     }
+    off_t file_sz = get_file_size(file_fd);
+    off_t bytes_remaining = file_sz;
+    off_t offset = 0;
+    int current_block = 0;
+    int blocks = (int) file_sz / BLOCK_SZ;
+    if (file_sz % BLOCK_SZ) blocks++;
+    struct file_info *fi = malloc(sizeof(*fi) +
+                                          (sizeof(struct iovec) * blocks));
 
-    // Output the read string
-    buffer[cqe->res] = '\0'; // Ensure the string is null-terminated
-    printf("Read result: %s\n", buffer);
+    /*
+     * For each block of the file we need to read, we allocate an iovec struct
+     * which is indexed into the iovecs array. This array is passed in as part
+     * of the submission. If you don't understand this, then you need to look
+     * up how the readv() and writev() system calls work.
+     * */
+    while (bytes_remaining) {
+        off_t bytes_to_read = bytes_remaining;
+        if (bytes_to_read > BLOCK_SZ)
+            bytes_to_read = BLOCK_SZ;
 
-    // Mark the CQE as seen
-    *s->cq_ring.head += 1;
+        offset += bytes_to_read;
+        fi->iovecs[current_block].iov_len = bytes_to_read;
+
+        void *buf;
+        if( posix_memalign(&buf, BLOCK_SZ, BLOCK_SZ)) {
+            perror("posix_memalign");
+            return 1;
+        }
+        fi->iovecs[current_block].iov_base = buf;
+
+        current_block++;
+        bytes_remaining -= bytes_to_read;
+    }
+    fi->file_sz = file_sz;
+
+    /* Get an SQE */
+    struct io_uring_sqe *sqe = NULL;
+    while (!sqe) {
+      sqe = io_uring_get_sqe(ring);
+      int ret = 0;
+      if (!sqe) {
+        if (sqpoll) {
+          ret = io_uring_sqring_wait(ring);
+        } else
+          ret = io_uring_submit(ring);
+      }
+      if (ret < 0) {
+        perror("io_uring_submit_and_wait");
+        close(file_fd);
+        free(fi);
+        return 1;
+      }
+    }
+
+    /* Setup a readv operation */
+    io_uring_prep_readv(sqe, file_fd, fi->iovecs, blocks, 0);
+    /* Set user data */
+    io_uring_sqe_set_data(sqe, fi);
+    /* Finally, submit the request */
+    io_uring_submit(ring);
 
     return 0;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file1> <file2> ... <fileN>\n", argv[0]);
-        return 1;
-    }
-
-    struct submitter *s = (struct submitter *)malloc(sizeof(struct submitter));
-    if (s == NULL) {
-        fprintf(stderr, "Failed to allocate memory for submitter.\n");
-        return 1;
-    }
-    memset(s, 0, sizeof(struct submitter));
-
-    // Setup io_uring with SQ Polling
+    struct io_uring ring;
     struct io_uring_params params;
-    memset(&params, 0, sizeof(params));
-    params.flags = IORING_SETUP_SQPOLL;
-    params.sq_thread_idle = 2000; // 2 seconds idle time
+    int ret;
 
-    s->ring_fd = io_uring_setup(QUEUE_DEPTH, &params);
-    if (s->ring_fd < 0) {
-        perror("io_uring_setup");
-        free(s);
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s [file name] <[file name] ...>\n",
+                argv[0]);
         return 1;
     }
 
-    if (app_setup_uring(s)) {
-        fprintf(stderr, "Failed to setup io_uring.\n");
-        free(s);
+    sqpoll = true;
+    /* Initialize io_uring with params */
+    memset(&params, 0, sizeof(params));
+    if (sqpoll) {
+        params.flags |= IORING_SETUP_SQPOLL;
+        params.sq_thread_idle = 1000;
+    }
+
+    ret = io_uring_queue_init_params(QUEUE_DEPTH, &ring, &params);
+    if (ret) {
+        fprintf(stderr, "io_uring_queue_init_params: %s\n", strerror(-ret));
         return 1;
     }
 
     for (int i = 1; i < argc; i++) {
-        int fd = open(argv[i], O_RDONLY);
-        if (fd < 0) {
-            perror("open");
-            continue;
+        ret = submit_read_request(argv[i], &ring);
+        if (ret) {
+            fprintf(stderr, "Error reading file: %s\n", argv[i]);
+            return 1;
         }
-
-        if (handle_io_uring(s, fd)) {
-            fprintf(stderr, "Failed to handle io_uring for file: %s\n", argv[i]);
-        }
-
-        close(fd);
+        get_completion_and_print(&ring);
     }
 
-    // Cleanup
-    close(s->ring_fd);
-    munmap(s->sq_ring.head, s->sring_sz);
-    munmap(s->cq_ring.head, s->cring_sz);
-    free(s);
-
+    /* Call the clean-up function. */
+    io_uring_queue_exit(&ring);
     return 0;
 }
