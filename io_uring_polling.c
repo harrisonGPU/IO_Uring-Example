@@ -139,7 +139,7 @@ size_t my_fread(void *restrict buffer, size_t size, size_t count, my_file *restr
 }
 
 // Close the file structure and clean up io_uring resources
-void my_close(my_file *mf) {
+void my_fclose(my_file *mf) {
     if (mf) {
         if (mf->stream) {
             fclose(mf->stream);
@@ -168,7 +168,7 @@ int main(int argc, char *argv[]) {
             break;
     }
 
-    my_close(mf);
+    my_fclose(mf);
     print_sq_poll_kernel_thread_status();
 
     return 0;
