@@ -16,7 +16,48 @@ void print_sq_poll_kernel_thread_status() {
         printf("Kernel thread io_uring-sq is not running.\n");
 }
 
-size_t my_fread(void *restrict buffer, size_t size, size_t count, FILE *restrict stream) {
+size_t my_fread(void *restrict buffer, size_t size, size_t count, FILE *restrict stream, struct io_uring *ring) {
+    int fd = fileno(stream);
+    if (fd < 0) {
+        perror("fileno");
+        return 0;
+    }
+
+    struct iovec iov = {
+        .iov_base = buffer,
+        .iov_len = size * count
+    };
+
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe) {
+        fprintf(stderr, "Unable to get sqe\n");
+        return 0;
+    }
+
+    io_uring_prep_readv(sqe, fd, &iov, 1, 0);
+
+    io_uring_submit(ring);
+
+    struct io_uring_cqe *cqe;
+    int ret = io_uring_wait_cqe(ring, &cqe);
+    if (ret < 0) {
+        fprintf(stderr, "Error waiting for completion: %s\n", strerror(-ret));
+        return 0;
+    }
+
+    if (cqe->res < 0) {
+        fprintf(stderr, "Async readv failed: %s\n", strerror(-cqe->res));
+        io_uring_cqe_seen(ring, cqe);
+        return 0;
+    }
+
+    size_t bytes_read = cqe->res;
+    io_uring_cqe_seen(ring, cqe);
+
+    return bytes_read / size;
+}
+
+int main(int argc, char *argv[]) {
     struct io_uring ring;
     struct io_uring_params params;
     memset(&params, 0, sizeof(params));
@@ -26,77 +67,12 @@ size_t my_fread(void *restrict buffer, size_t size, size_t count, FILE *restrict
 
     if (io_uring_queue_init_params(QUEUE_DEPTH, &ring, &params) < 0) {
         perror("io_uring_queue_init_params");
-        return 0;
+        return 1;
     }
 
-    int fd = fileno(stream);
-    if (fd < 0) {
-        perror("fileno");
-        io_uring_queue_exit(&ring);
-        return 0;
-    }
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        perror("fcntl(F_GETFL)");
-        io_uring_queue_exit(&ring);
-        return 0;
-    }
-
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        perror("fcntl(F_SETFL)");
-        io_uring_queue_exit(&ring);
-        return 0;
-    }
-
-    if (io_uring_register_files(&ring, &fd, 1) < 0) {
-        perror("io_uring_register_files");
-        io_uring_queue_exit(&ring);
-        return 0;
-    }
-
-    struct iovec iov = {
-        .iov_base = buffer,
-        .iov_len = size * count
-    };
-
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    if (!sqe) {
-        fprintf(stderr, "Unable to get sqe\n");
-        io_uring_queue_exit(&ring);
-        return 0;
-    }
-
-    io_uring_prep_readv(sqe, 0, &iov, 1, 0);
-    sqe->flags |= IOSQE_FIXED_FILE;
-
-    io_uring_submit(&ring);
-
-    struct io_uring_cqe *cqe;
-    int ret = io_uring_wait_cqe(&ring, &cqe);
-    if (ret < 0) {
-        fprintf(stderr, "Error waiting for completion: %s\n", strerror(-ret));
-        io_uring_queue_exit(&ring);
-        return 0;
-    }
-
-    if (cqe->res < 0) {
-        fprintf(stderr, "Async readv failed: %s\n", strerror(-cqe->res));
-        io_uring_cqe_seen(&ring, cqe);
-        io_uring_queue_exit(&ring);
-        return 0;
-    }
-
-    size_t bytes_read = cqe->res;
-    io_uring_cqe_seen(&ring, cqe);
-    io_uring_queue_exit(&ring);
-
-    return bytes_read / size;
-}
-
-int main(int argc, char *argv[]) {
     if (geteuid()) {
         fprintf(stderr, "You need root privileges to run this program.\n");
+        io_uring_queue_exit(&ring);
         return 1;
     }
 
@@ -105,6 +81,37 @@ int main(int argc, char *argv[]) {
     FILE *fp = fopen("CMakeLists.txt", "r");
     if (!fp) {
         perror("fopen");
+        io_uring_queue_exit(&ring);
+        return 1;
+    }
+
+    int fd = fileno(fp);
+    if (fd < 0) {
+        perror("fileno");
+        fclose(fp);
+        io_uring_queue_exit(&ring);
+        return 1;
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl(F_GETFL)");
+        fclose(fp);
+        io_uring_queue_exit(&ring);
+        return 1;
+    }
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl(F_SETFL)");
+        fclose(fp);
+        io_uring_queue_exit(&ring);
+        return 1;
+    }
+
+    if (io_uring_register_files(&ring, &fd, 1) < 0) {
+        perror("io_uring_register_files");
+        fclose(fp);
+        io_uring_queue_exit(&ring);
         return 1;
     }
 
@@ -112,7 +119,7 @@ int main(int argc, char *argv[]) {
     size_t n = 0;
 
     int times = 0;
-    while ((n = my_fread(buffer, sizeof(char), BUFFER_SIZE, fp)) > 0) {
+    while ((n = my_fread(buffer, sizeof(char), BUFFER_SIZE, fp, &ring)) > 0) {
         buffer[n] = '\0'; // Null-terminate the buffer to safely print it
         printf("%s", buffer);
 
@@ -122,8 +129,8 @@ int main(int argc, char *argv[]) {
     }
 
     fclose(fp);
-
     print_sq_poll_kernel_thread_status();
+    io_uring_queue_exit(&ring);
 
     return 0;
 }
