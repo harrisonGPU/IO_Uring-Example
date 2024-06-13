@@ -13,6 +13,7 @@
 typedef struct {
     FILE *stream;
     struct io_uring ring;
+    struct iovec iov;   // Add an iovec here for reuse
 } my_file;
 
 // Function to print the status of the io_uring kernel thread
@@ -29,20 +30,11 @@ my_file *my_fopen(const char *filename, const char *mode) {
     struct io_uring_params params;
     memset(&params, 0, sizeof(params));
 
-    // Set up io_uring to use SQ polling
     params.flags = IORING_SETUP_SQPOLL;
     params.sq_thread_idle = 2000;
 
-    // Initialize the io_uring queue with the specified parameters
     if (io_uring_queue_init_params(QUEUE_DEPTH, &ring, &params) < 0) {
         perror("io_uring_queue_init_params");
-        return NULL;
-    }
-
-    // Check for root privileges required for setting up SQPOLL
-    if (geteuid()) {
-        fprintf(stderr, "You need root privileges to run this program.\n");
-        io_uring_queue_exit(&ring);
         return NULL;
     }
 
@@ -61,23 +53,6 @@ my_file *my_fopen(const char *filename, const char *mode) {
         return NULL;
     }
 
-    // Retrieve and set file descriptor flags for non-blocking mode
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        perror("fcntl(F_GETFL)");
-        fclose(fp);
-        io_uring_queue_exit(&ring);
-        return NULL;
-    }
-
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        perror("fcntl(F_SETFL)");
-        fclose(fp);
-        io_uring_queue_exit(&ring);
-        return NULL;
-    }
-
-    // Register the file descriptor with io_uring
     if (io_uring_register_files(&ring, &fd, 1) < 0) {
         perror("io_uring_register_files");
         fclose(fp);
@@ -85,11 +60,19 @@ my_file *my_fopen(const char *filename, const char *mode) {
         return NULL;
     }
 
-    // Allocate memory for the custom file structure
     my_file *mf = malloc(sizeof(my_file));
     if (mf) {
         mf->stream = fp;
         mf->ring = ring;
+        mf->iov.iov_base = malloc(BUFFER_SIZE); // Static buffer
+        if (mf->iov.iov_base == NULL) {
+            perror("Failed to allocate buffer");
+            fclose(fp);
+            io_uring_queue_exit(&ring);
+            free(mf);
+            return NULL;
+        }
+        mf->iov.iov_len = BUFFER_SIZE;          // Length of the static buffer
     } else {
         fclose(fp);
         io_uring_queue_exit(&ring);
@@ -98,43 +81,44 @@ my_file *my_fopen(const char *filename, const char *mode) {
     return mf;
 }
 
-// Fread function to perform asynchronous read using io_uring
+// Fread function to perform multiple asynchronous reads if needed
 size_t my_fread(void *restrict buffer, size_t size, size_t count, my_file *restrict mf) {
-    int fd = fileno(mf->stream);
-    if (fd < 0) {
-        perror("fileno");
-        return 0;
-    }
+    size_t total_bytes = size * count;
+    size_t bytes_read = 0;
 
-    struct iovec iov = {
-        .iov_base = buffer,
-        .iov_len = size * count
-    };
+    while (total_bytes > 0) {
+        size_t bytes_to_read = total_bytes > BUFFER_SIZE ? BUFFER_SIZE : total_bytes;
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&mf->ring);
+        if (!sqe) {
+            fprintf(stderr, "Unable to get sqe\n");
+            return bytes_read;
+        }
 
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&mf->ring);
-    if (!sqe) {
-        fprintf(stderr, "Unable to get sqe\n");
-        return 0;
-    }
+        io_uring_prep_readv(sqe, fileno(mf->stream), &mf->iov, 1, 0); // Read at the current file position
+        io_uring_submit(&mf->ring);
 
-    io_uring_prep_readv(sqe, fd, &iov, 1, 0);
-    io_uring_submit(&mf->ring);
+        struct io_uring_cqe *cqe;
+        int ret = io_uring_wait_cqe(&mf->ring, &cqe);
+        if (ret < 0) {
+            fprintf(stderr, "Error waiting for completion: %s\n", strerror(-ret));
+            break;
+        }
 
-    struct io_uring_cqe *cqe;
-    int ret = io_uring_wait_cqe(&mf->ring, &cqe);
-    if (ret < 0) {
-        fprintf(stderr, "Error waiting for completion: %s\n", strerror(-ret));
-        return 0;
-    }
+        if (cqe->res < 0) {
+            fprintf(stderr, "Async readv failed: %s\n", strerror(-cqe->res));
+            io_uring_cqe_seen(&mf->ring, cqe);
+            break;
+        }
 
-    if (cqe->res < 0) {
-        fprintf(stderr, "Async readv failed: %s\n", strerror(-cqe->res));
+        size_t bytes_copied = (size_t)cqe->res > bytes_to_read ? bytes_to_read : (size_t)cqe->res;
+        memcpy(buffer, mf->iov.iov_base, bytes_copied); // Copy data to user buffer
+        buffer = (char *)buffer + bytes_copied;
+        bytes_read += bytes_copied;
+        total_bytes -= bytes_copied;
+
         io_uring_cqe_seen(&mf->ring, cqe);
-        return 0;
     }
 
-    size_t bytes_read = cqe->res;
-    io_uring_cqe_seen(&mf->ring, cqe);
     return bytes_read / size;
 }
 
@@ -144,6 +128,7 @@ void my_fclose(my_file *mf) {
         if (mf->stream) {
             fclose(mf->stream);
         }
+        free(mf->iov.iov_base); // Free the static buffer
         io_uring_queue_exit(&mf->ring);
         free(mf);
     }
