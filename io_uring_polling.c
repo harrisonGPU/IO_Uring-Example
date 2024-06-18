@@ -16,6 +16,32 @@ typedef struct {
     struct iovec iov;   // Add an iovec here for reuse
 } my_file;
 
+static inline void io_uring_prep_rw_my(int op, struct io_uring_sqe *sqe, int fd,
+				    const void *addr, unsigned len,
+				    __u64 offset)
+{
+	sqe->opcode = (__u8) op;
+	sqe->flags = 0;
+	sqe->ioprio = 0;
+	sqe->fd = fd;
+	sqe->off = offset;
+	sqe->addr = (unsigned long) addr;
+	sqe->len = len;
+	sqe->rw_flags = 0;
+	sqe->user_data = 0;
+	sqe->buf_index = 0;
+	sqe->personality = 0;
+	sqe->file_index = 0;
+	sqe->__pad2[0] = sqe->__pad2[1] = 0;
+}
+
+static inline void io_uring_prep_readv_my(struct io_uring_sqe *sqe, int fd,
+				       const struct iovec *iovecs,
+				       unsigned nr_vecs, __u64 offset)
+{
+	io_uring_prep_rw_my(IORING_OP_READV, sqe, fd, iovecs, nr_vecs, offset);
+}
+
 // Function to print the status of the io_uring kernel thread
 void print_sq_poll_kernel_thread_status() {
     if (system("ps --ppid 2 | grep io_uring-sq") == 0)
@@ -94,7 +120,22 @@ size_t my_fread(void *restrict buffer, size_t size, size_t count, my_file *restr
             return bytes_read;
         }
 
-        io_uring_prep_readv(sqe, fileno(mf->stream), &mf->iov, 1, 0); // Read at the current file position
+        // This is io_uring_prep_readv implement
+        sqe->opcode = (__u8)IORING_OP_READV;
+        sqe->flags = 0;
+        sqe->ioprio = 0;
+        sqe->fd = fileno(mf->stream);
+        sqe->off = (__u64)0;
+        sqe->addr = (unsigned long)&mf->iov;
+        sqe->len = (unsigned)1;
+        sqe->rw_flags = 0;
+        sqe->user_data = 0;
+        sqe->buf_index = 0;
+        sqe->personality = 0;
+        sqe->file_index = 0;
+        sqe->__pad2[0] = sqe->__pad2[1] = 0;
+
+
         io_uring_submit(&mf->ring);
 
         struct io_uring_cqe *cqe;
@@ -149,7 +190,7 @@ int main(int argc, char *argv[]) {
         printf("%s", buffer);
 
         times++;
-        if (times > 10)
+        if (times == 10)
             break;
     }
 
