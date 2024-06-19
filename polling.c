@@ -21,8 +21,19 @@ void setup_read(struct io_uring *ring, struct file_info *fi,
   struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
   if (!sqe)
     return;
-
-  io_uring_prep_read(sqe, fi->fd, fi->buf, BUFFER_SIZE, fi->offset);
+  sqe->opcode = (__u8)IORING_OP_READ;
+  sqe->flags = 0;
+	sqe->ioprio = 0;
+  sqe->fd = fi->fd;
+  sqe->off = fi->offset;
+  sqe->addr = (unsigned long) fi->buf;
+  sqe->len = BUFFER_SIZE;
+  sqe->rw_flags = 0;
+	sqe->buf_index = 0;
+	sqe->personality = 0;
+	sqe->file_index = 0;
+	sqe->addr3 = 0;
+  sqe->__pad2[0] = 0;
   sqe->user_data = fi - files;
 }
 
@@ -62,31 +73,31 @@ int my_fopen(int argc, char *argv[], struct io_uring *ring,
 }
 
 int my_fread(struct io_uring *ring, struct file_info files[], int *num_files) {
-  while (*num_files > 0) {
-    struct io_uring_cqe *cqe;
-    int ret = io_uring_wait_cqe(ring, &cqe);
-    if (ret < 0) {
-      fprintf(stderr, "Error waiting for completion: %s\n", strerror(-ret));
-      break;
+    while (*num_files > 0) {
+        struct io_uring_cqe *cqe;
+        int ret = io_uring_peek_cqe(ring, &cqe);
+
+        if (ret == 0 && cqe != NULL) {
+            struct file_info *fi = &files[cqe->user_data];
+            if (cqe->res < 0) {
+                fprintf(stderr, "Async read failed: %s\n", strerror(-cqe->res));
+                (*num_files)--;
+            } else if (cqe->res > 0) {
+                write(STDOUT_FILENO, fi->buf, cqe->res);
+                fi->offset += cqe->res;
+                setup_read(ring, fi, files); // Prepare next read
+            } else {
+                // This might occur if the file is done reading, and there's no more data.
+                (*num_files)--;
+            }
+
+            io_uring_cqe_seen(ring, cqe);
+        } else {
+            usleep(100); // Sleep for a short time to reduce busy-waiting
+        }
     }
 
-    struct file_info *fi = &files[cqe->user_data];
-    if (cqe->res < 0) {
-      fprintf(stderr, "Async readv failed: %s\n", strerror(-cqe->res));
-      (*num_files)--;
-    } else if (cqe->res > 0) {
-      write(STDOUT_FILENO, fi->buf, cqe->res);
-      fi->offset += cqe->res;
-      setup_read(ring, fi, files); // Prepare next read
-    } else {
-      (*num_files)--;
-    }
-
-    io_uring_cqe_seen(ring, cqe);
-  }
-
-  return 1; // Return status could be used to indicate success or error
-            // condition
+    return 1; // Return status could be used to indicate success or error condition
 }
 
 void my_close(struct io_uring *ring, struct file_info files[], int num_files) {
