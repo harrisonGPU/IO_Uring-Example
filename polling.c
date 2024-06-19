@@ -1,3 +1,4 @@
+#include <liburing/io_uring.h>
 #include <stdio.h>
 #include <liburing.h>
 #include <fcntl.h>
@@ -15,30 +16,32 @@ struct file_info {
     char buf[BUFFER_SIZE];
 };
 
-void setup_read(struct io_uring *ring, struct file_info *fi, struct file_info *files);
+void setup_read(struct io_uring *ring, struct file_info *fi, struct file_info *files) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe) return;
 
-int main(int argc, char *argv[]) {
-    struct io_uring ring;
+    io_uring_prep_read(sqe, fi->fd, fi->buf, BUFFER_SIZE, fi->offset);
+    sqe->user_data = fi - files;
+}
+
+int my_fopen(int argc, char *argv[], struct io_uring *ring, struct file_info files[QUEUE_DEPTH]) {
     struct io_uring_params params;
-    struct file_info files[QUEUE_DEPTH];
     int num_files = argc - 1;
-    int first_submission = 1;
 
     if (argc < 2) {
         printf("Usage: %s <file1> <file2> ... <fileN>\n", argv[0]);
-        return 1;
+        return -1;
     }
 
     memset(&params, 0, sizeof(params));
-    params.flags = IORING_SETUP_SQPOLL;
-    params.sq_thread_idle = 10000;
+    params.flags |= IORING_SETUP_SQPOLL;
+    params.sq_thread_idle = 1000;
 
-    if (io_uring_queue_init_params(QUEUE_DEPTH, &ring, &params)) {
-        perror("io_uring_queue_init_params");
-        return 1;
+    if (io_uring_queue_init_params(QUEUE_DEPTH, ring, &params)) {
+      perror("io_uring_queue_init_params");
+      return -1;
     }
 
-    // Open files and setup first read
     for (int i = 1; i < argc; i++) {
         int fd = open(argv[i], O_RDONLY);
         if (fd < 0) {
@@ -47,12 +50,24 @@ int main(int argc, char *argv[]) {
         }
         files[i-1].fd = fd;
         files[i-1].offset = 0;
-        setup_read(&ring, &files[i-1], files);
+        setup_read(ring, &files[i-1], files);
     }
 
-    if (first_submission) {
-        io_uring_submit(&ring);
-        first_submission = 0;
+    io_uring_submit(ring);
+
+    return num_files;
+}
+
+int main(int argc, char *argv[]) {
+    struct io_uring ring;
+    struct file_info files[QUEUE_DEPTH];
+    int num_files = 0;
+
+    num_files = my_fopen(argc, argv, &ring, files);
+
+    if (num_files <= 0) {
+        printf("Fopen failed!\n");
+        return 1;
     }
 
     // Main event loop
@@ -82,12 +97,4 @@ int main(int argc, char *argv[]) {
 
     io_uring_queue_exit(&ring);
     return 0;
-}
-
-void setup_read(struct io_uring *ring, struct file_info *fi, struct file_info *files) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-    if (!sqe) return;
-
-    io_uring_prep_read(sqe, fi->fd, fi->buf, BUFFER_SIZE, fi->offset);
-    sqe->user_data = fi - files; // Calculate index based on pointer arithmetic
 }
