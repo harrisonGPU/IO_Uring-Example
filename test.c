@@ -84,10 +84,6 @@ int io_uring_register(unsigned int fd, unsigned int opcode,
 	return (int) syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
 }
 
-/*
- * Returns the size of the file whose open file descriptor is passed in.
- * Properly handles regular file and block devices as well. Pretty.
- * */
 
 off_t get_file_size(int fd) {
     struct stat st;
@@ -109,54 +105,27 @@ off_t get_file_size(int fd) {
     return -1;
 }
 
-/*
- * io_uring requires a lot of setup which looks pretty hairy, but isn't all
- * that difficult to understand. Because of all this boilerplate code,
- * io_uring's author has created liburing, which is relatively easy to use.
- * However, you should take your time and understand this code. It is always
- * good to know how it all works underneath. Apart from bragging rights,
- * it does offer you a certain strange geeky peace.
- * */
-
 int app_setup_uring(struct submitter *s) {
+    memset(s, 0, sizeof(*s));
     struct app_io_sq_ring *sring = &s->sq_ring;
     struct app_io_cq_ring *cring = &s->cq_ring;
     struct io_uring_params p;
     void *sq_ptr, *cq_ptr;
 
-    /*
-     * We need to pass in the io_uring_params structure to the io_uring_setup()
-     * call zeroed out. We could set any flags if we need to, but for this
-     * example, we don't.
-     * */
     memset(&p, 0, sizeof(p));
     p.flags |= IORING_SETUP_SQPOLL;
     p.flags |= IORING_SETUP_SQ_AFF;
     p.sq_thread_idle = 200000;
-    p.sq_thread_cpu = 22;
+    p.sq_thread_cpu = 4;
     s->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
     if (s->ring_fd < 0) {
       perror("io_uring_setup");
       return 1;
     }
 
-    /*
-     * io_uring communication happens via 2 shared kernel-user space ring buffers,
-     * which can be jointly mapped with a single mmap() call in recent kernels. 
-     * While the completion queue is directly manipulated, the submission queue 
-     * has an indirection array in between. We map that in as well.
-     * */
-
     int sring_sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
     int cring_sz = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
 
-    /* In kernel version 5.4 and above, it is possible to map the submission and 
-     * completion buffers with a single mmap() call. Rather than check for kernel 
-     * versions, the recommended way is to just check the features field of the 
-     * io_uring_params structure, which is a bit mask. If the 
-     * IORING_FEAT_SINGLE_MMAP is set, then we can do away with the second mmap()
-     * call to map the completion ring.
-     * */
     if (p.features & IORING_FEAT_SINGLE_MMAP) {
         if (cring_sz > sring_sz) {
             sring_sz = cring_sz;
@@ -164,9 +133,6 @@ int app_setup_uring(struct submitter *s) {
         cring_sz = sring_sz;
     }
 
-    /* Map in the submission and completion queue ring buffers.
-     * Older kernels only map in the submission queue, though.
-     * */
     sq_ptr = mmap(0, sring_sz, PROT_READ | PROT_WRITE, 
             MAP_SHARED | MAP_POPULATE,
             s->ring_fd, IORING_OFF_SQ_RING);
@@ -187,8 +153,7 @@ int app_setup_uring(struct submitter *s) {
             return 1;
         }
     }
-    /* Save useful fields in a global app_io_sq_ring struct for later
-     * easy reference */
+
     sring->head = sq_ptr + p.sq_off.head;
     sring->tail = sq_ptr + p.sq_off.tail;
     sring->ring_mask = sq_ptr + p.sq_off.ring_mask;
@@ -196,7 +161,6 @@ int app_setup_uring(struct submitter *s) {
     sring->flags = sq_ptr + p.sq_off.flags;
     sring->array = sq_ptr + p.sq_off.array;
 
-    /* Map in the submission queue entries array */
     s->sqes = mmap(0, p.sq_entries * sizeof(struct io_uring_sqe),
             PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE,
             s->ring_fd, IORING_OFF_SQES);
@@ -205,8 +169,6 @@ int app_setup_uring(struct submitter *s) {
         return 1;
     }
 
-    /* Save useful fields in a global app_io_cq_ring struct for later
-     * easy reference */
     cring->head = cq_ptr + p.cq_off.head;
     cring->tail = cq_ptr + p.cq_off.tail;
     cring->ring_mask = cq_ptr + p.cq_off.ring_mask;
@@ -216,24 +178,14 @@ int app_setup_uring(struct submitter *s) {
     return 0;
 }
 
-/*
- * Output a string of characters of len length to stdout.
- * We use buffered output here to be efficient,
- * since we need to output character-by-character.
- * */
 void output_to_console(char *buf, int len) {
     while (len--) {
         fputc(*buf++, stdout);
     }
 }
 
-/*
- * Read from completion queue.
- * In this function, we read completion events from the completion queue, get
- * the data buffer that will have the file data and print it to the console.
- * */
 
-void read_from_cq(struct submitter *s) {
+void my_fread(struct submitter *s) {
     struct file_info *fi;
     struct app_io_cq_ring *cring = &s->cq_ring;
     struct io_uring_cqe *cqe;
@@ -243,10 +195,7 @@ void read_from_cq(struct submitter *s) {
 
     do {
         read_barrier();
-        /*
-         * Remember, this is a ring buffer. If head == tail, it means that the
-         * buffer is empty.
-         * */
+
         if (head == *cring->tail)
             break;
 
@@ -268,21 +217,12 @@ void read_from_cq(struct submitter *s) {
     *cring->head = head;
     write_barrier();
 }
-/*
- * Submit to submission queue.
- * In this function, we submit requests to the submission queue. You can submit
- * many types of requests. Ours is going to be the readv() request, which we
- * specify via IORING_OP_READV.
- *
- * */
-int submit_to_sq(char *file_path, struct submitter *s) {
+
+int my_fopen(char *file_path, struct submitter *s) {
     struct file_info *fi;
 
+    
     int file_fd = open(file_path, O_RDONLY);
-    if (file_fd < 0 ) {
-        perror("open");
-        return 1;
-    }
 
     struct app_io_sq_ring *sring = &s->sq_ring;
     unsigned index = 0, current_block = 0, tail = 0, next_tail = 0;
@@ -301,12 +241,6 @@ int submit_to_sq(char *file_path, struct submitter *s) {
     }
     fi->file_sz = file_sz;
 
-    /*
-     * For each block of the file we need to read, we allocate an iovec struct
-     * which is indexed into the iovecs array. This array is passed in as part
-     * of the submission. If you don't understand this, then you need to look
-     * up how the readv() and writev() system calls work.
-     * */
     while (bytes_remaining) {
         off_t bytes_to_read = bytes_remaining;
         if (bytes_to_read > BLOCK_SZ)
@@ -341,18 +275,11 @@ int submit_to_sq(char *file_path, struct submitter *s) {
     sring->array[index] = index;
     tail = next_tail;
 
-    /* Update the tail so the kernel can see it. */
     if(*sring->tail != tail) {
         *sring->tail = tail;
         write_barrier();
     }
 
-    /*
-     * Tell the kernel we have submitted events with the io_uring_enter() system
-     * call. We also pass in the IOURING_ENTER_GETEVENTS flag which causes the
-     * io_uring_enter() call to wait until min_complete events (the 3rd param)
-     * complete.
-     * */
     if ((*sring->flags) & IORING_SQ_NEED_WAKEUP) {
       int ret = io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_GETEVENTS);
       first++;
@@ -367,25 +294,24 @@ int submit_to_sq(char *file_path, struct submitter *s) {
 int main(int argc, char *argv[]) {
     struct submitter s;
     first = 0;
+    int files = argc;
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return 1;
     }
-
-    memset(&s, 0, sizeof(s));
 
     if(app_setup_uring(&s)) {
         fprintf(stderr, "Unable to setup uring!\n");
         return 1;
     }
 
-    for (int i = 1; i < argc; i++) {
-        if(submit_to_sq(argv[i], &s)) {
-            fprintf(stderr, "Error reading file\n");
-            return 1;
-        }
+    int i = 1;
+    while (my_fopen(argv[i], &s) == 0) {
         sleep(10);
-        read_from_cq(&s);
+        my_fread(&s);
+        i++;
+        if (i == files)
+            break;
     }
 
     printf("Times = %d\n", first);
