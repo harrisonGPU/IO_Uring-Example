@@ -60,6 +60,13 @@ struct file_info {
     struct iovec iovecs[];      /* Referred by readv/writev */
 };
 
+typedef struct {
+  int fd;
+  off_t file_sz;
+  struct submitter *s;
+  struct iovec iovecs[]; /* Referred by readv/writev */
+} my_file;
+
 /*
  * This code is written in the days when io_uring-related system calls are not
  * part of standard C libraries. So, we roll our own system call wrapper
@@ -115,7 +122,7 @@ int app_setup_uring(struct submitter *s) {
     memset(&p, 0, sizeof(p));
     p.flags |= IORING_SETUP_SQPOLL;
     p.flags |= IORING_SETUP_SQ_AFF;
-    p.sq_thread_idle = 200000;
+    p.sq_thread_idle = 10000;
     p.sq_thread_cpu = 4;
     s->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
     if (s->ring_fd < 0) {
@@ -279,10 +286,10 @@ int my_fopen(char *file_path, struct submitter *s) {
         *sring->tail = tail;
         write_barrier();
     }
-
+    
     if ((*sring->flags) & IORING_SQ_NEED_WAKEUP) {
-      int ret = io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_GETEVENTS);
       first++;
+      int ret = io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_GETEVENTS);
       if (ret < 0) {
         perror("io_uring_enter");
         return 1;
@@ -291,28 +298,113 @@ int my_fopen(char *file_path, struct submitter *s) {
     return 0;
 }
 
+my_file *m_fopen(const char *filename, const char *mode) {
+    struct submitter *s = malloc(sizeof(struct submitter));
+    if(app_setup_uring(s)) {
+        fprintf(stderr, "Unable to setup uring!\n");
+        free(s);
+        return NULL;
+    }
+
+    // TODO: Write file
+    int fd = open(filename, O_RDONLY);
+    struct app_io_sq_ring *sring = &s->sq_ring;
+    unsigned index = 0, current_block = 0, tail = 0, next_tail = 0;
+
+    off_t file_sz = get_file_size(fd);
+    if (file_sz < 0)
+      return NULL;
+    off_t bytes_remaining = file_sz;
+    int blocks = (int)file_sz / BLOCK_SZ;
+    if (file_sz % BLOCK_SZ)
+      blocks++;
+    
+    my_file *mf = malloc(sizeof(my_file) + sizeof(struct iovec) * blocks);
+    if (!mf) {
+        fprintf(stderr, "Unable to allocate memory\n");
+        return NULL;
+    }
+    mf->file_sz = file_sz;
+    mf->s = s;
+    mf->fd = fd;
+    
+    while (bytes_remaining) {
+      off_t bytes_to_read = bytes_remaining;
+      if (bytes_to_read > BLOCK_SZ)
+        bytes_to_read = BLOCK_SZ;
+
+      mf->iovecs[current_block].iov_len = bytes_to_read;
+
+      void *buf;
+      if (posix_memalign(&buf, BLOCK_SZ, BLOCK_SZ)) {
+        perror("posix_memalign");
+        return NULL;
+      }
+      mf->iovecs[current_block].iov_base = buf;
+
+      current_block++;
+      bytes_remaining -= bytes_to_read;
+    }
+
+    /* Add our submission queue entry to the tail of the SQE ring buffer */
+    next_tail = tail = *sring->tail;
+    next_tail++;
+    read_barrier();
+    index = tail & *s->sq_ring.ring_mask;
+    struct io_uring_sqe *sqe = &s->sqes[index];
+    sqe->fd = fd;
+    sqe->flags = 0;
+    sqe->opcode = IORING_OP_READV;
+    sqe->addr = (unsigned long)mf->iovecs;
+    sqe->len = blocks;
+    sqe->off = 0;
+    sqe->user_data = (unsigned long long)mf;
+    sring->array[index] = index;
+    tail = next_tail;
+
+    if (*sring->tail != tail) {
+      *sring->tail = tail;
+      write_barrier();
+    }
+
+    if ((*sring->flags) & IORING_SQ_NEED_WAKEUP) {
+      first++;
+      int ret = io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_GETEVENTS);
+      if (ret < 0) {
+        perror("io_uring_enter");
+        return NULL;
+      }
+    }
+    return mf;
+}
+
 int main(int argc, char *argv[]) {
-    struct submitter s;
+    //struct submitter s;
     first = 0;
     int files = argc;
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return 1;
     }
+    my_file *mf = m_fopen(argv[1], "r");
+    if(mf != NULL)
+        my_fread(mf->s);
+    else
+        printf("Fopen Fail!");
+    // if(app_setup_uring(&s)) {
+    //     fprintf(stderr, "Unable to setup uring!\n");
+    //     return 1;
+    // }
 
-    if(app_setup_uring(&s)) {
-        fprintf(stderr, "Unable to setup uring!\n");
-        return 1;
-    }
+    // int i = 1;
+    // while (my_fopen(argv[i], &s) == 0) {
+    //     sleep(10);
+    //     my_fread(&s);
+    //     i++;
+    //     if (i == files)
+    //         break;
+    // }
 
-    int i = 1;
-    while (my_fopen(argv[i], &s) == 0) {
-        sleep(10);
-        my_fread(&s);
-        i++;
-        if (i == files)
-            break;
-    }
 
     printf("Times = %d\n", first);
     return 0;
