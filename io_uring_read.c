@@ -234,7 +234,7 @@ void my_fread(size_t size, size_t count, my_file *restrict mf) {
     head = *cring->head;
 
     while (head == *cring->tail) {
-        sleep(1);
+        usleep(100);
     }
     do {
         read_barrier();
@@ -363,6 +363,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return 1;
     }
+    clock_t start = clock();
 
     for (int i = 1; i < argc; i++)
     {
@@ -375,7 +376,10 @@ int main(int argc, char *argv[]) {
             break;
         }
     }
+    clock_t end = clock();
+    double cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+    printf("Elapsed time: %f seconds\n", cpu_time_used);
 
-    printf("io_uring_enter times = %d\n", first);
+    printf("Use io_uring_enter system call times = %d\n", first);
     return 0;
 }
