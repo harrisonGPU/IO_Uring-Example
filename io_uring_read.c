@@ -383,7 +383,8 @@ int main(int argc, char *argv[]) {
     my_file *mf = my_fopen(argv[i], "r");
     if (mf != NULL) {
       buffer_manager.buffer[buffer_manager.buffer_pos] = '\0';
-      printf("This is shared buffer: %s\n", buffer_manager.buffer);
+      printf("This is shared buffer: \n");
+      fputs(buffer_manager.buffer, stdout);
     } else {
       printf("Fopen Fail!");
       break;
