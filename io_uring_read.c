@@ -153,8 +153,8 @@ int app_setup_uring(struct submitter *s) {
     memset(&p, 0, sizeof(p));
     p.flags |= IORING_SETUP_SQPOLL;
     p.flags |= IORING_SETUP_SQ_AFF;
-    p.sq_thread_idle = 20000;
-    p.sq_thread_cpu = 4;
+    p.sq_thread_idle = 200000;
+    //p.sq_thread_cpu = 4;
     s->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
     if (s->ring_fd < 0) {
       perror("io_uring_setup");
@@ -233,6 +233,9 @@ void my_fread(size_t size, size_t count, my_file *restrict mf) {
 
     head = *cring->head;
 
+    while (head == *cring->tail) {
+        sleep(1);
+    }
     do {
         read_barrier();
 
@@ -345,7 +348,7 @@ my_file *my_fopen(const char *filename, const char *mode) {
 
     if ((*sring->flags) & IORING_SQ_NEED_WAKEUP) {
       first++;
-      int ret = io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_GETEVENTS);
+      int ret = io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_SQ_WAKEUP);
       if (ret < 0) {
         perror("io_uring_enter");
         return NULL;
@@ -365,7 +368,6 @@ int main(int argc, char *argv[]) {
     {
         my_file *mf = my_fopen(argv[i], "r");
         if (mf != NULL) {
-            sleep(10);
             my_fread(mf->fi->file_sz, 1,mf);
         }
         else {
