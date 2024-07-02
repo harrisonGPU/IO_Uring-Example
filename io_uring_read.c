@@ -2,6 +2,7 @@
 #include <inttypes.h> // For PRIdMAX
 #include <linux/fs.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,9 +71,9 @@ typedef struct {
 #define MAX_BUFFER_SIZE 10 * 1024 * 1024
 
 typedef struct {
-    char *buffer;
-    size_t buffer_pos;
-    size_t buffer_size;
+  char *buffer;
+  size_t buffer_pos;
+  size_t buffer_size;
 } BufferManager;
 
 BufferManager buffer_manager;
@@ -97,29 +98,9 @@ int io_uring_register(unsigned int fd, unsigned int opcode, const void *arg,
   return (int)syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
 }
 
-off_t get_file_size(int fd) {
+off_t get_file_size(FILE *file) {
   struct stat st;
-
-  if (fstat(fd, &st) < 0) {
-    perror("fstat");
-    return -1;
-  }
-  if (S_ISBLK(st.st_mode)) {
-    unsigned long long bytes;
-    if (ioctl(fd, BLKGETSIZE64, &bytes) != 0) {
-      perror("ioctl");
-      return -1;
-    }
-    return bytes;
-  } else if (S_ISREG(st.st_mode))
-    return st.st_size;
-
-  return -1;
-}
-
-off_t get_file_size2(FILE *file) {
-  struct stat st;
-  int fd = fileno(file); // 获取与 FILE* 关联的文件描述符
+  int fd = fileno(file);
 
   if (fd == -1) {
     perror("fileno");
@@ -217,27 +198,26 @@ int app_setup_uring(struct submitter *s) {
 }
 
 void init_global_buffer(size_t size) {
-    buffer_manager.buffer = malloc(size);
-    if (!buffer_manager.buffer) {
-        perror("Failed to allocate global buffer");
-        exit(EXIT_FAILURE);
-    }
-    buffer_manager.buffer_pos = 0;
-    buffer_manager.buffer_size = size;
+  buffer_manager.buffer = malloc(size);
+  if (!buffer_manager.buffer) {
+    perror("Failed to allocate global buffer");
+    exit(EXIT_FAILURE);
+  }
+  buffer_manager.buffer_pos = 0;
+  buffer_manager.buffer_size = size;
 }
 
-void free_global_buffer() {
-    free(buffer_manager.buffer);
-}
+void free_global_buffer() { free(buffer_manager.buffer); }
 
 void output_to_console(char *buf, int len) {
-    if (buffer_manager.buffer_pos + len > buffer_manager.buffer_size) {
-        fprintf(stderr, "Global buffer overflow\n");
-        return;
-    }
-    memcpy(buffer_manager.buffer + buffer_manager.buffer_pos, buf, len);
-    buffer_manager.buffer_pos += len;
+  if (buffer_manager.buffer_pos + len > buffer_manager.buffer_size) {
+    fprintf(stderr, "Global buffer overflow\n");
+    return;
+  }
+  memcpy(buffer_manager.buffer + buffer_manager.buffer_pos, buf, len);
+  buffer_manager.buffer_pos += len;
 }
+
 
 my_file *my_fopen(const char *filename, const char *mode) {
   struct submitter *s = malloc(sizeof(struct submitter));
@@ -248,7 +228,6 @@ my_file *my_fopen(const char *filename, const char *mode) {
     return NULL;
   }
 
-  // TODO: Write file
   FILE *fp = fopen(filename, mode);
   if (!fp) {
     printf("Fopen Failed!");
@@ -261,12 +240,11 @@ my_file *my_fopen(const char *filename, const char *mode) {
     return NULL;
   }
 
-  // printf("fd is %d, fd1 is %d\n", fd, fd1);
   struct app_io_sq_ring *sring = &s->sq_ring;
   unsigned index = 0, current_block = 0, tail = 0, next_tail = 0;
 
-  off_t file_sz = get_file_size2(fp);
-  printf("The size of the file is: %" PRIdMAX " bytes\n", (intmax_t)file_sz);
+  off_t file_sz = get_file_size(fp);
+  // printf("The size of the file is: %" PRIdMAX " bytes\n", (intmax_t)file_sz);
   if (file_sz < 0)
     return NULL;
   off_t bytes_remaining = file_sz;
@@ -281,7 +259,6 @@ my_file *my_fopen(const char *filename, const char *mode) {
   }
   fi->file_sz = file_sz;
   my_file *mf = malloc(sizeof(my_file));
-  ;
   mf->s = s;
   mf->fi = fi;
   mf->fp = fp;
@@ -334,14 +311,21 @@ my_file *my_fopen(const char *filename, const char *mode) {
     }
   }
 
-  // Save data to buffer
-  struct app_io_cq_ring *cring = &s->cq_ring;
+  return mf;
+}
+
+size_t my_fread(void *ptr, size_t size, size_t count, my_file *restrict mf) {
+  struct submitter *s = mf->s;
   struct file_info *fi_read;
+  struct app_io_cq_ring *cring = &s->cq_ring;
   struct io_uring_cqe *cqe;
   size_t total_bytes = mf->fi->file_sz;
   unsigned head, reaped = 0;
+
+  head = *cring->head;
+
   while (head == *cring->tail) {
-    usleep(100);
+    usleep(1);
   }
   do {
     read_barrier();
@@ -361,13 +345,30 @@ my_file *my_fopen(const char *filename, const char *mode) {
 
     for (int i = 0; i < blocks; i++)
       output_to_console(fi_read->iovecs[i].iov_base, fi_read->iovecs[i].iov_len);
-
+    buffer_manager.buffer[buffer_manager.buffer_pos] = '\0';
     head++;
   } while (1);
 
   *cring->head = head;
   write_barrier();
-  return mf;
+  
+  return buffer_manager.buffer_pos;
+}
+
+void cat(const char *filename) {
+  my_file *mf = my_fopen(filename, "r");
+  if (!mf) {
+    perror("Faied to open file.");
+  }
+
+  size_t bytesRead;
+
+  if ((bytesRead = my_fread(buffer_manager.buffer, sizeof(char), MAX_BUFFER_SIZE, mf)) > 0) {
+    //fwrite(buffer_manager.buffer, 1, bytesRead, stdout);
+    fputs(buffer_manager.buffer, stdout);
+  }
+  
+  return;
 }
 
 int main(int argc, char *argv[]) {
@@ -380,20 +381,12 @@ int main(int argc, char *argv[]) {
 
   for (int i = 1; i < argc; i++) {
     init_global_buffer(MAX_BUFFER_SIZE);
-    my_file *mf = my_fopen(argv[i], "r");
-    if (mf != NULL) {
-      buffer_manager.buffer[buffer_manager.buffer_pos] = '\0';
-      printf("This is shared buffer: \n");
-      fputs(buffer_manager.buffer, stdout);
-    } else {
-      printf("Fopen Fail!");
-      break;
-    }
+    cat(argv[i]);
     free_global_buffer();
   }
   clock_t end = clock();
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
-  
+
   printf("Elapsed time: %f seconds\n", cpu_time_used);
   printf("Use io_uring_enter system call times = %d\n", first);
   return 0;
