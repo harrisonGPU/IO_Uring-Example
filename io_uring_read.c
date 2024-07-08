@@ -20,7 +20,7 @@
  * */
 #include <linux/io_uring.h>
 
-#define QUEUE_DEPTH 128
+#define QUEUE_DEPTH 256
 #define BLOCK_SZ 4096
 int first;
 /* This is x86 specific */
@@ -137,7 +137,7 @@ int app_setup_uring(struct submitter *s) {
   p.flags |= IORING_SETUP_SQPOLL;
   p.flags |= IORING_SETUP_SQ_AFF;
   p.sq_thread_idle = 200000;
-  // p.sq_thread_cpu = 4;
+  //p.sq_thread_cpu = 4;
   s->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
   if (s->ring_fd < 0) {
     perror("io_uring_setup");
@@ -218,6 +218,10 @@ void output_to_console(char *buf, int len) {
   buffer_manager.buffer_pos += len;
 }
 
+void output_to_console1(char *buf, int len) {
+  fputs(buf, stdout);
+  return;
+}
 
 my_file *my_fopen(const char *filename, const char *mode) {
   struct submitter *s = malloc(sizeof(struct submitter));
@@ -244,7 +248,6 @@ my_file *my_fopen(const char *filename, const char *mode) {
   unsigned index = 0, current_block = 0, tail = 0, next_tail = 0;
 
   off_t file_sz = get_file_size(fp);
-  // printf("The size of the file is: %" PRIdMAX " bytes\n", (intmax_t)file_sz);
   if (file_sz < 0)
     return NULL;
   off_t bytes_remaining = file_sz;
@@ -325,7 +328,7 @@ size_t my_fread(void *ptr, size_t size, size_t count, my_file *restrict mf) {
   head = *cring->head;
 
   while (head == *cring->tail) {
-    usleep(1);
+    //usleep(1);
   }
   do {
     read_barrier();
@@ -344,14 +347,17 @@ size_t my_fread(void *ptr, size_t size, size_t count, my_file *restrict mf) {
       blocks++;
 
     for (int i = 0; i < blocks; i++)
-      output_to_console(fi_read->iovecs[i].iov_base, fi_read->iovecs[i].iov_len);
-    buffer_manager.buffer[buffer_manager.buffer_pos] = '\0';
+      output_to_console1(fi_read->iovecs[i].iov_base,
+                         fi_read->iovecs[i].iov_len);
+    
+    // TODO: use global buffer
+    // buffer_manager.buffer[buffer_manager.buffer_pos] = '\0';
     head++;
   } while (1);
 
   *cring->head = head;
   write_barrier();
-  
+
   return buffer_manager.buffer_pos;
 }
 
@@ -362,12 +368,16 @@ void cat(const char *filename) {
   }
 
   size_t bytesRead;
-
-  if ((bytesRead = my_fread(buffer_manager.buffer, sizeof(char), MAX_BUFFER_SIZE, mf)) > 0) {
-    //fwrite(buffer_manager.buffer, 1, bytesRead, stdout);
-    fputs(buffer_manager.buffer, stdout);
+  clock_t start = clock();
+  if ((bytesRead = my_fread(buffer_manager.buffer, sizeof(char),
+                            MAX_BUFFER_SIZE, mf)) > 0) {
+    // fwrite(buffer_manager.buffer, 1, bytesRead, stdout);
+    // fputs(buffer_manager.buffer, stdout);
   }
-  
+  clock_t end = clock();
+  double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
+
+  printf("Elapsed fread time: %f seconds\n", cpu_time_used);
   return;
 }
 
