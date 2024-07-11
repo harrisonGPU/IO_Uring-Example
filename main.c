@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
-
+double perFileTime;
 void cat(const char *filename) {
   my_file *mf = my_fopen(filename, "r");
   if (!mf) {
@@ -19,8 +19,8 @@ void cat(const char *filename) {
   }
   clock_t end = clock();
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
-
-  printf("my_fread takes time: %f seconds\n", cpu_time_used);
+  perFileTime += cpu_time_used;
+  //printf("Completed reading '%s': Duration = %f seconds, File Size = %ld bytes.\n", filename, cpu_time_used, mf->fi->file_sz);
 }
 
 int main(int argc, char *argv[]) {
@@ -28,6 +28,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
     return 1;
   }
+  perFileTime = 0;
   clock_t start = clock();
 
   systemTimes = 0;
@@ -37,7 +38,8 @@ int main(int argc, char *argv[]) {
   clock_t end = clock();
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
 
-  printf("Total time: %f seconds\n", cpu_time_used);
+  printf("Total time to read %d files: %f seconds\n", argc - 1, cpu_time_used);
+  printf("Average time per read file: %f seconds\n", perFileTime / (argc - 1));
   printf("Use io_uring_enter system call times = %d\n", systemTimes);
   return 0;
 }
