@@ -202,33 +202,6 @@ int app_setup_uring(struct submitter *s) {
   return 0;
 }
 
-void init_global_buffer(size_t size) {
-  buffer_manager.buffer = malloc(size);
-  if (!buffer_manager.buffer) {
-    perror("Failed to allocate global buffer");
-    exit(EXIT_FAILURE);
-  }
-  buffer_manager.buffer_pos = 0;
-  buffer_manager.buffer_size = size;
-}
-
-void free_global_buffer() { free(buffer_manager.buffer); }
-
-void output_to_console(char *buf, int len) {
-  if (buffer_manager.buffer_pos + len > buffer_manager.buffer_size) {
-    fprintf(stderr, "Global buffer overflow\n");
-    return;
-  }
-  memcpy(buffer_manager.buffer + buffer_manager.buffer_pos, buf, len);
-  buffer_manager.buffer_pos += len;
-}
-
-void output_to_console1(char *buf, int len) {
-  fwrite(buf, 1, len, stdout);
-  fflush(stdout);
-  return;
-}
-
 my_file *my_fopen(const char *filename, const char *mode) {
   struct submitter *s = malloc(sizeof(struct submitter));
   struct file_info *fi;
@@ -355,6 +328,8 @@ size_t my_fread(void *ptr, size_t size, size_t count, my_file *restrict mf) {
       break;
 
     /* Get the entry */
+    // If this is the first visit to this file's io_uring cqe queue, we need to
+    // save it to reduce time spent.
     if (mf->isfirst == 0) {
       cqe = &cring->cqes[head & *s->cq_ring.ring_mask];
       fi_read = (struct file_info *)cqe->user_data;
