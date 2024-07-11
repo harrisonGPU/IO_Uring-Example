@@ -22,7 +22,7 @@
 
 #define QUEUE_DEPTH 256
 #define BLOCK_SZ 4096
-int first;
+int systemTimes;
 /* This is x86 specific */
 #define read_barrier() __asm__ __volatile__("" ::: "memory")
 #define write_barrier() __asm__ __volatile__("" ::: "memory")
@@ -63,7 +63,12 @@ struct file_info {
 
 typedef struct {
   FILE *fp;
+  int blocks;
+  int current_block;
+  int isfirst;
+  size_t current_offset;
   struct submitter *s;
+  struct file_info *fi_read;
   struct file_info *fi;
 } my_file;
 
@@ -136,8 +141,8 @@ int app_setup_uring(struct submitter *s) {
   memset(&p, 0, sizeof(p));
   p.flags |= IORING_SETUP_SQPOLL;
   p.flags |= IORING_SETUP_SQ_AFF;
-  p.sq_thread_idle = 200000;
-  //p.sq_thread_cpu = 4;
+  p.sq_thread_idle = 2000000;
+  // p.sq_thread_cpu = 4;
   s->ring_fd = io_uring_setup(QUEUE_DEPTH, &p);
   if (s->ring_fd < 0) {
     perror("io_uring_setup");
@@ -219,7 +224,8 @@ void output_to_console(char *buf, int len) {
 }
 
 void output_to_console1(char *buf, int len) {
-  fputs(buf, stdout);
+  fwrite(buf, 1, len, stdout);
+  fflush(stdout);
   return;
 }
 
@@ -265,6 +271,10 @@ my_file *my_fopen(const char *filename, const char *mode) {
   mf->s = s;
   mf->fi = fi;
   mf->fp = fp;
+  mf->blocks = blocks;
+  mf->current_block = 0;
+  mf->current_offset = 0;
+  mf->isfirst = 0;
 
   while (bytes_remaining) {
     off_t bytes_to_read = bytes_remaining;
@@ -306,7 +316,7 @@ my_file *my_fopen(const char *filename, const char *mode) {
   }
 
   if ((*sring->flags) & IORING_SQ_NEED_WAKEUP) {
-    first++;
+    systemTimes++;
     int ret = io_uring_enter(s->ring_fd, 1, 1, IORING_ENTER_SQ_WAKEUP);
     if (ret < 0) {
       perror("io_uring_enter");
@@ -322,43 +332,78 @@ size_t my_fread(void *ptr, size_t size, size_t count, my_file *restrict mf) {
   struct file_info *fi_read;
   struct app_io_cq_ring *cring = &s->cq_ring;
   struct io_uring_cqe *cqe;
-  size_t total_bytes = mf->fi->file_sz;
-  unsigned head, reaped = 0;
+  size_t total_bytes = size * count;
+  size_t bytes_read = 0;
 
-  head = *cring->head;
+  unsigned head = *cring->head;
+  unsigned tail = *cring->tail;
+  unsigned index = mf->current_block;
+  size_t offset = mf->current_offset;
 
-  while (head == *cring->tail) {
-    //usleep(1);
+  if (index >= mf->blocks)
+    return 0;
+
+  if (mf->isfirst == 0) {
+    while (head == *cring->tail) {
+      // usleep(1);
+    }
   }
   do {
     read_barrier();
 
-    if (head == *cring->tail)
+    if (mf->isfirst == 0 && head == *cring->tail)
       break;
 
     /* Get the entry */
-    cqe = &cring->cqes[head & *s->cq_ring.ring_mask];
-    fi_read = (struct file_info *)cqe->user_data;
-    if (cqe->res < 0)
-      fprintf(stderr, "Error: %s\n", strerror(abs(cqe->res)));
+    if (mf->isfirst == 0) {
+      cqe = &cring->cqes[head & *s->cq_ring.ring_mask];
+      fi_read = (struct file_info *)cqe->user_data;
+      mf->fi_read = fi_read;
+      mf->isfirst = 1;
+      if (cqe->res < 0) {
+        fprintf(stderr, "Error: %s\n", strerror(abs(cqe->res)));
+        break;
+      }
+    } else {
+      fi_read = mf->fi_read;
+    }
 
-    int blocks = (int)total_bytes / BLOCK_SZ;
-    if (total_bytes % BLOCK_SZ)
-      blocks++;
+    size_t block_size = BLOCK_SZ - offset;
+    size_t to_copy = fi_read->iovecs[index].iov_len;
+    size_t remaining_space = total_bytes - bytes_read;
 
-    for (int i = 0; i < blocks; i++)
-      output_to_console1(fi_read->iovecs[i].iov_base,
-                         fi_read->iovecs[i].iov_len);
-    
-    // TODO: use global buffer
-    // buffer_manager.buffer[buffer_manager.buffer_pos] = '\0';
-    head++;
-  } while (1);
+    if (to_copy > block_size) {
+      to_copy = block_size; // Only read to the end of the current block
+    }
+
+    if (to_copy > remaining_space) {
+      to_copy = remaining_space; // Prevent buffer overflow
+    }
+
+    // Copy data from the current block into the user's buffer
+    memcpy((char *)ptr + bytes_read,
+           (char *)fi_read->iovecs[index].iov_base + offset, to_copy);
+    bytes_read += to_copy;
+    offset += to_copy;
+
+    // Move to the next block if we have finished the current one
+    if (offset >= BLOCK_SZ) {
+      index++;
+      offset = 0; // Reset offset for the new block
+      head++;     // Move the head forward to mark this CQE as seen
+    }
+
+    if (bytes_read >= total_bytes) {
+      break; // We've read enough data
+    }
+  } while (index < mf->blocks);
+
+  mf->current_block = index;
+  mf->current_offset = offset;
 
   *cring->head = head;
   write_barrier();
-
-  return buffer_manager.buffer_pos;
+  return bytes_read;
 }
 
 void cat(const char *filename) {
@@ -368,36 +413,34 @@ void cat(const char *filename) {
   }
 
   size_t bytesRead;
+  char buffer[1024];
   clock_t start = clock();
-  if ((bytesRead = my_fread(buffer_manager.buffer, sizeof(char),
-                            MAX_BUFFER_SIZE, mf)) > 0) {
-    // fwrite(buffer_manager.buffer, 1, bytesRead, stdout);
-    // fputs(buffer_manager.buffer, stdout);
+  while ((bytesRead = my_fread(buffer, sizeof(char), sizeof(buffer), mf)) > 0) {
+    // TODO: shared buffer
+    // write(STDOUT_FILENO, buffer, bytesRead);
   }
   clock_t end = clock();
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
 
-  printf("Elapsed fread time: %f seconds\n", cpu_time_used);
+  printf("my_fread takes time: %f seconds\n", cpu_time_used);
   return;
 }
 
 int main(int argc, char *argv[]) {
-  first = 0;
   if (argc < 2) {
     fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
     return 1;
   }
   clock_t start = clock();
 
+  systemTimes = 0;
   for (int i = 1; i < argc; i++) {
-    init_global_buffer(MAX_BUFFER_SIZE);
     cat(argv[i]);
-    free_global_buffer();
   }
   clock_t end = clock();
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
 
-  printf("Elapsed time: %f seconds\n", cpu_time_used);
-  printf("Use io_uring_enter system call times = %d\n", first);
+  printf("Total time: %f seconds\n", cpu_time_used);
+  printf("Use io_uring_enter system call times = %d\n", systemTimes);
   return 0;
 }
