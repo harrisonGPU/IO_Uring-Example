@@ -1,15 +1,14 @@
 #!/bin/bash
 
-# 设置源文件路径
-SOURCE_FILE="/root/Projects/io_uring/IO_Uring-Example/Data/Large-Data1.txt"
+# src
+SOURCE_FILE="/root/Projects/io_uring/IO_Uring-Example/Data/large.txt"
 
-# 设置目标目录路径
+# dest
 TARGET_DIR="/root/Projects/io_uring/IO_Uring-Example/Data/Large"
 
-# 检查目标目录是否存在，如果不存在则创建
 mkdir -p "$TARGET_DIR"
 
-# 开始复制文件
+# copy
 for i in {1..100}; do
     cp "$SOURCE_FILE" "$TARGET_DIR/$i.txt"
     echo "File $i.txt copied"

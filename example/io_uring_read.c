@@ -388,7 +388,7 @@ void cat(const char *filename) {
   }
 
   size_t bytesRead;
-  char buffer[1024];
+  char buffer[4096];
   clock_t start = clock();
   while ((bytesRead = my_fread(buffer, sizeof(char), sizeof(buffer), mf)) > 0) {
     // TODO: shared buffer
