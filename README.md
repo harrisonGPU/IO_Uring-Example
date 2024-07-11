@@ -1,44 +1,23 @@
 # IO_Uring-Example
 
-This repository contains a C program that demonstrates the usage of `io_uring` for asynchronous I/O operations on Linux, specifically designed to run on Ubuntu 22.04.
+This repository contains a C program demonstrating the usage of Linux's `io_uring` interface for asynchronous I/O operations, designed specifically for Ubuntu 22.04.
 
 ## Prerequisites
 
-Before building and running this project, you need to install `liburing` and `PkgConfig` on Ubuntu 22.04 to handle the asynchronous I/O capabilities and manage library paths.
-
-### Installing PkgConfig
-
-`PkgConfig` is a helper tool used when compiling applications and libraries. It helps you insert the correct compiler options on the command line so an application can use `gcc -o test test.c $(pkg-config --libs --cflags glib-2.0)` for instance.
-
-To install `PkgConfig`, open a terminal and run:
-
-```bash
-sudo apt update
-sudo apt install pkg-config
-```
-
-### Installing liburing
-
-`liburing` provides an easier and more straightforward way to use Linux kernel's `io_uring` interface.
-
-To install `liburing`, execute:
-
-```bash
-sudo apt update
-sudo apt install liburing-dev
-```
+Ensure your system is running Ubuntu 22.04. No additional libraries or packages are needed beyond what's provided by a standard C development environment.
 
 ## Building the Code
 
-Once the prerequisites are installed, you can build the program using `CMake`. Here's how to set it up:
+To build the program, follow these steps using `CMake`:
 
 1. **Clone the Repository**
 
-   First, clone this repository to your local machine:
+   Clone this repository to your local machine using the following command:
 
    ```bash
-   git clone git@github.com:TSWorld1314/IO_Uring-Example.git
+   git clone https://github.com/TSWorld1314/IO_Uring-Example.git
    cd IO_Uring-Example
+
    ```
 
 2. **Create a Build Directory**
@@ -71,6 +50,6 @@ Once the prerequisites are installed, you can build the program using `CMake`. H
    After building the project, you can run the program directly:
 
    ```bash
-   ./io_uring_example  ../hello.txt
+   ./my_cat ../Data/*
    ```
    
