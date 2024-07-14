@@ -311,3 +311,31 @@ size_t my_fread(void *ptr, size_t size, size_t count, my_file *mf) {
   write_barrier();
   return bytes_read;
 }
+
+void my_fclose(my_file *mf) {
+    if (mf == NULL) {
+        return; // If the pointer is NULL, no deallocation is needed.
+    }
+
+    // Close the file descriptor if open.
+    if (mf->fp) {
+        fclose(mf->fp);
+        mf->fp = NULL;
+    }
+
+    // Free the file_info structure.
+    if (mf->fi) {
+        omp_free(mf->fi, llvm_omp_target_shared_mem_alloc);
+        mf->fi = NULL;
+    }
+
+    // Free the submitter structure and any associated resources.
+    if (mf->s) {
+        // Continue similarly for other mmap'ed or allocated regions within submitter if any.
+        omp_free(mf->s, llvm_omp_target_shared_mem_alloc);
+        mf->s = NULL;
+    }
+
+    // Finally, free the my_file structure itself.
+    omp_free(mf,llvm_omp_target_shared_mem_alloc);
+}

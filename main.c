@@ -26,6 +26,8 @@ void cat(const char *filename) {
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
   perFileTime += cpu_time_used;
   printf("Completed reading '%s': Duration = %f seconds, File Size = %ld bytes.\n", filename, cpu_time_used, mf->fi->file_sz);
+  my_fclose(mf);
+  return;
 }
 
 int main(int argc, char *argv[]) {

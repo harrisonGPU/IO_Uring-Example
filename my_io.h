@@ -82,5 +82,5 @@ off_t get_file_size(FILE *file);
 int app_setup_uring(struct submitter *s);
 my_file *my_fopen(const char *filename, const char *mode);
 size_t my_fread(void *ptr, size_t size, size_t count, my_file *mf);
-
+void my_fclose(my_file *mf);
 #endif // MY_IO_H
