@@ -41,9 +41,14 @@ struct submitter {
   struct app_io_cq_ring cq_ring;
 };
 
+struct iovc {
+  void *buffer; /* Pointer to data.  */
+  size_t buffer_size; /* Length of data.  */
+};
+
 struct file_info {
   off_t file_sz;
-  struct iovec iovecs[]; /* Referred by readv/writev */
+  struct iovc iovecs[]; /* Referred by readv/writev */
 };
 
 typedef struct {

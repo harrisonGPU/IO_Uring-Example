@@ -14,6 +14,7 @@
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
+#include <omp.h>
 
 /* If your compilation fails because the header file below is missing,
  * your kernel is probably too old to support io_uring.
@@ -56,9 +57,14 @@ struct submitter {
   struct app_io_cq_ring cq_ring;
 };
 
+struct iovc {
+  void *buffer; /* Pointer to data.  */
+  size_t buffer_size; /* Length of data.  */
+};
+
 struct file_info {
   off_t file_sz;
-  struct iovec iovecs[]; /* Referred by readv/writev */
+  struct iovc iovecs[]; /* Referred by readv/writev */
 };
 
 typedef struct {
@@ -75,13 +81,6 @@ typedef struct {
 // Define the global structure
 #define MAX_BUFFER_SIZE 10 * 1024 * 1024
 
-typedef struct {
-  char *buffer;
-  size_t buffer_pos;
-  size_t buffer_size;
-} BufferManager;
-
-BufferManager buffer_manager;
 /*
  * This code is written in the days when io_uring-related system calls are not
  * part of standard C libraries. So, we roll our own system call wrapper
@@ -203,7 +202,7 @@ int app_setup_uring(struct submitter *s) {
 }
 
 my_file *my_fopen(const char *filename, const char *mode) {
-  struct submitter *s = malloc(sizeof(struct submitter));
+  struct submitter *s = omp_alloc(sizeof(struct submitter), llvm_omp_target_shared_mem_alloc);
   struct file_info *fi;
   if (app_setup_uring(s)) {
     fprintf(stderr, "Unable to setup uring!\n");
@@ -234,13 +233,13 @@ my_file *my_fopen(const char *filename, const char *mode) {
   if (file_sz % BLOCK_SZ)
     blocks++;
 
-  fi = malloc(sizeof(*fi) + sizeof(struct iovec) * blocks);
+  fi = omp_alloc(sizeof(*fi) + sizeof(struct iovec) * blocks, llvm_omp_target_shared_mem_alloc);
   if (!fi) {
     fprintf(stderr, "Unable to allocate memory\n");
     return NULL;
   }
   fi->file_sz = file_sz;
-  my_file *mf = malloc(sizeof(my_file));
+  my_file *mf = omp_alloc(sizeof(my_file), llvm_omp_target_shared_mem_alloc);
   mf->s = s;
   mf->fi = fi;
   mf->fp = fp;
@@ -254,14 +253,14 @@ my_file *my_fopen(const char *filename, const char *mode) {
     if (bytes_to_read > BLOCK_SZ)
       bytes_to_read = BLOCK_SZ;
 
-    fi->iovecs[current_block].iov_len = bytes_to_read;
+    fi->iovecs[current_block].buffer_size = bytes_to_read;
 
     void *buf;
     if (posix_memalign(&buf, BLOCK_SZ, BLOCK_SZ)) {
       perror("posix_memalign");
       return NULL;
     }
-    fi->iovecs[current_block].iov_base = buf;
+    fi->iovecs[current_block].buffer = buf;
 
     current_block++;
     bytes_remaining -= bytes_to_read;
@@ -344,7 +343,7 @@ size_t my_fread(void *ptr, size_t size, size_t count, my_file *restrict mf) {
     }
 
     size_t block_size = BLOCK_SZ - offset;
-    size_t to_copy = fi_read->iovecs[index].iov_len;
+    size_t to_copy = fi_read->iovecs[index].buffer_size;
     size_t remaining_space = total_bytes - bytes_read;
 
     if (to_copy > block_size) {
@@ -357,7 +356,7 @@ size_t my_fread(void *ptr, size_t size, size_t count, my_file *restrict mf) {
 
     // Copy data from the current block into the user's buffer
     memcpy((char *)ptr + bytes_read,
-           (char *)fi_read->iovecs[index].iov_base + offset, to_copy);
+           (char *)fi_read->iovecs[index].buffer + offset, to_copy);
     bytes_read += to_copy;
     offset += to_copy;
 
@@ -388,11 +387,15 @@ void cat(const char *filename) {
   }
 
   size_t bytesRead;
-  char buffer[4096];
+  char *buffer = (char *)omp_alloc(4096, llvm_omp_target_shared_mem_alloc);
+  if (!buffer) {
+    fprintf(stderr, "Failed to allocate buffer\n");
+    return;
+  }
   clock_t start = clock();
   while ((bytesRead = my_fread(buffer, sizeof(char), sizeof(buffer), mf)) > 0) {
     // TODO: shared buffer
-    // write(STDOUT_FILENO, buffer, bytesRead);
+    write(STDOUT_FILENO, buffer, bytesRead);
   }
   clock_t end = clock();
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;

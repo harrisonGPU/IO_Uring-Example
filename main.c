@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
+#include <omp.h>
 double perFileTime;
 void cat(const char *filename) {
   my_file *mf = my_fopen(filename, "r");
@@ -11,7 +12,11 @@ void cat(const char *filename) {
   }
 
   size_t bytesRead;
-  char buffer[1024];
+  char *buffer = (char *)omp_alloc(4096, llvm_omp_target_shared_mem_alloc);
+  if (!buffer) {
+    fprintf(stderr, "Failed to allocate buffer\n");
+    return;
+  }
   clock_t start = clock();
   while ((bytesRead = my_fread(buffer, sizeof(char), sizeof(buffer), mf)) > 0) {
     // TODO: shared buffer
@@ -20,7 +25,7 @@ void cat(const char *filename) {
   clock_t end = clock();
   double cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
   perFileTime += cpu_time_used;
-  //printf("Completed reading '%s': Duration = %f seconds, File Size = %ld bytes.\n", filename, cpu_time_used, mf->fi->file_sz);
+  printf("Completed reading '%s': Duration = %f seconds, File Size = %ld bytes.\n", filename, cpu_time_used, mf->fi->file_sz);
 }
 
 int main(int argc, char *argv[]) {
