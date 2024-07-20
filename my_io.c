@@ -165,6 +165,14 @@ my_file *my_fopen(const char *filename, const char *mode) {
   if (file_sz % BLOCK_SZ)
     blocks++;
 
+  int result = io_uring_register(s->ring_fd, IORING_REGISTER_FILES, &fd, 1);
+  if (result < 0) {
+    perror("io_uring_register_fds failed");
+    fclose(fp);
+    omp_free(s, llvm_omp_target_shared_mem_alloc);
+    return NULL;
+  }
+  
   fi = omp_alloc(sizeof(*fi) + sizeof(struct iovec) * blocks, llvm_omp_target_shared_mem_alloc);
   if (!fi) {
     fprintf(stderr, "Unable to allocate memory\n");
