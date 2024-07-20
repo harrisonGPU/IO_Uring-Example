@@ -15,12 +15,6 @@
 
 int systemTimes = 0;
 
-/*
- * This code is written in the days when io_uring-related system calls are not
- * part of standard C libraries. So, we roll our own system call wrapper
- * functions.
- * */
-
 int io_uring_setup(unsigned entries, struct io_uring_params *p) {
   return (int)syscall(__NR_io_uring_setup, entries, p);
 }
@@ -62,6 +56,14 @@ off_t get_file_size(FILE *file) {
   }
 
   return -1;
+}
+
+void update_file_size(my_file *mf) {
+    if (mf && mf->fp) {
+        fseek(mf->fp, 0, SEEK_END);
+        mf->fi->file_sz = ftell(mf->fp);
+        fseek(mf->fp, 0, SEEK_SET);
+    }
 }
 
 int app_setup_uring(struct submitter *s) {
@@ -134,7 +136,7 @@ int app_setup_uring(struct submitter *s) {
 }
 
 my_file *my_fopen(const char *filename, const char *mode) {
-  struct submitter *s = omp_alloc(sizeof(struct submitter), llvm_omp_target_shared_mem_alloc);
+  struct submitter *s = static_cast<struct submitter*>(omp_alloc(sizeof(struct submitter), llvm_omp_target_shared_mem_alloc));
   struct file_info *fi;
   if (app_setup_uring(s)) {
     fprintf(stderr, "Unable to setup uring!\n");
@@ -173,13 +175,13 @@ my_file *my_fopen(const char *filename, const char *mode) {
     return NULL;
   }
   
-  fi = omp_alloc(sizeof(*fi) + sizeof(struct iovec) * blocks, llvm_omp_target_shared_mem_alloc);
+  fi = static_cast<struct file_info *>(omp_alloc(sizeof(*fi) + sizeof(struct iovec) * blocks, llvm_omp_target_shared_mem_alloc));
   if (!fi) {
     fprintf(stderr, "Unable to allocate memory\n");
     return NULL;
   }
   fi->file_sz = file_sz;
-  my_file *mf = omp_alloc(sizeof(my_file), llvm_omp_target_shared_mem_alloc);
+  my_file *mf = static_cast<my_file *>(omp_alloc(sizeof(my_file), llvm_omp_target_shared_mem_alloc));
   mf->s = s;
   mf->fi = fi;
   mf->fp = fp;
@@ -346,4 +348,6 @@ void my_fclose(my_file *mf) {
 
     // Finally, free the my_file structure itself.
     omp_free(mf,llvm_omp_target_shared_mem_alloc);
+
+    return;
 }
