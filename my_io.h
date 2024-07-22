@@ -3,7 +3,6 @@
 
 #include <atomic>
 #include <cstdio> // For FILE and off_t
-#include <vector>
 #include <linux/io_uring.h>
 
 #define QUEUE_DEPTH 256
@@ -66,7 +65,10 @@ struct my_file {
     file_info *fi;
 };
 
+// Global value
 extern int systemTimes;
+extern struct submitter *s;
+extern struct my_file *mf;
 
 int io_uring_setup(unsigned entries, io_uring_params *p);
 int io_uring_enter(int ring_fd, unsigned int to_submit, unsigned int min_complete, unsigned int flags);
@@ -75,6 +77,7 @@ off_t get_file_size(FILE *file);
 void update_file_size(my_file *mf);
 int app_setup_uring(submitter *s);
 my_file *my_fopen(const char *filename, const char *mode);
+bool submitRequest();
 size_t my_fread(void *ptr, size_t size, size_t count, my_file *mf);
 void my_fclose(my_file *mf);
 

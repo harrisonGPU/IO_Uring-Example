@@ -12,10 +12,10 @@ set(CMAKE_CXX_COMPILER "clang++")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp --offload-arch=sm_86")
 
 # Add static library
-add_library(my_io STATIC my_io.cpp)  # Ensure your library uses the .cpp file
+add_library(my_io STATIC device.cpp)  # Ensure your library uses the .cpp file
 
 # Add executable
-add_executable(my_cat main.cpp)  # Ensure your executable is set to use .cpp
+add_executable(my_cat host.cpp)  # Ensure your executable is set to use .cpp
 
 # Link libraries
 target_link_libraries(my_cat my_io)
