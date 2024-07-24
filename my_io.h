@@ -67,8 +67,6 @@ struct my_file {
 
 // Global value
 extern int systemTimes;
-extern struct submitter *s;
-extern struct my_file *mf;
 
 int io_uring_setup(unsigned entries, io_uring_params *p);
 int io_uring_enter(int ring_fd, unsigned int to_submit, unsigned int min_complete, unsigned int flags);
