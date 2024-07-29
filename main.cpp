@@ -22,11 +22,12 @@ void cat(const char *filename) {
         write(STDOUT_FILENO, buffer.get(), bytesRead);
     }
 
+    //std::cout << std::endl;
     auto end = std::clock();
     double cpu_time_used = double(end - start) / CLOCKS_PER_SEC;
     perFileTime += cpu_time_used;
 
-    std::cout << "Completed reading '" << filename << "': Duration = " << cpu_time_used << " seconds, File Size = " << mf->fi->file_sz << " bytes.\n";
+    std::cout << "\nCompleted reading '" << filename << "': Duration = " << cpu_time_used << " seconds, File Size = " << mf->fi->file_sz << " bytes.\n";
     my_fclose(mf);
 }
 
@@ -46,9 +47,9 @@ int main(int argc, char *argv[]) {
     auto end = std::clock();
     double total_time = double(end - start) / CLOCKS_PER_SEC;
 
-    std::cout << "Total time to read " << (argc - 1) << " files: " << total_time << " seconds\n";
-    std::cout << "Average time per read file: " << perFileTime / (argc - 1) << " seconds\n";
-    std::cout << "Use io_uring_enter system call times = " << systemTimes << std::endl;
+    //std::cout << "Total time to read " << (argc - 1) << " files: " << total_time << " seconds\n";
+    //std::cout << "Average time per read file: " << perFileTime / (argc - 1) << " seconds\n";
+    //std::cout << "Use io_uring_enter system call times = " << systemTimes << std::endl;
 
     return 0;
 }
