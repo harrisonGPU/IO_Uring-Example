@@ -55,7 +55,7 @@ struct file_info {
 };
 
 struct my_file {
-    FILE *fp;
+    int fd;
     int blocks;
     int current_block;
     int isfirst;

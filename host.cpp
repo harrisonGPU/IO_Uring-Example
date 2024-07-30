@@ -31,67 +31,47 @@ int io_uring_register(unsigned int fd, unsigned int opcode, const void *arg,
   return (int)syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
 }
 
-off_t get_file_size(FILE *file) {
-  struct stat st;
-  int fd = fileno(file);
-
-  if (fd == -1) {
-    perror("fileno");
-    return -1;
-  }
-
-  if (fstat(fd, &st) < 0) {
-    perror("fstat");
-    return -1;
-  }
-
-  if (S_ISBLK(st.st_mode)) {
-    unsigned long long bytes;
-    if (ioctl(fd, BLKGETSIZE64, &bytes) != 0) {
-      perror("ioctl");
-      return -1;
+off_t get_file_size(int fd) {
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        perror("fstat");
+        return -1;
     }
-    return bytes;
-  } else if (S_ISREG(st.st_mode)) {
     return st.st_size;
-  }
-
-  return -1;
 }
 
 void update_file_size(my_file *mf) {
-    if (mf && mf->fp) {
-        fseek(mf->fp, 0, SEEK_END);
-        mf->fi->file_sz = ftell(mf->fp);
-        fseek(mf->fp, 0, SEEK_SET);
+    if (mf && mf->fd >= 0) {
+        off_t file_size = lseek(mf->fd, 0, SEEK_END);  // Move to end to get file size
+        if (file_size == -1) {
+            perror("lseek");
+            return;
+        }
+        mf->fi->file_sz = file_size;
+        lseek(mf->fd, 0, SEEK_SET);  // Reset the file descriptor's position to the start
     }
 }
 
 my_file *my_fopen(const char *filename, const char *mode) {
   struct submitter *s = static_cast<struct submitter*>(omp_alloc(sizeof(struct submitter), llvm_omp_target_shared_mem_alloc));
   struct file_info *fi;
+  int flags = (strcmp(mode, "r") == 0) ? O_RDONLY : O_RDWR;
   if (app_setup_uring(s)) {
     fprintf(stderr, "Unable to setup uring!\n");
     free(s);
     return NULL;
   }
 
-  FILE *fp = fopen(filename, mode);
-  if (!fp) {
-    printf("Fopen Failed!");
-    return NULL;
-  }
-  int fd = fileno(fp);
-
+  int fd = open(filename, flags);
   if (fd < 0) {
-    printf("Fopen fileno");
+    printf("Fopen failed.");
     return NULL;
   }
 
   struct app_io_sq_ring *sring = &s->sq_ring;
   unsigned index = 0, current_block = 0, tail = 0, next_tail = 0;
 
-  off_t file_sz = get_file_size(fp);
+  off_t file_sz = get_file_size(fd);
   if (file_sz < 0)
     return NULL;
   off_t bytes_remaining = file_sz;
@@ -102,7 +82,7 @@ my_file *my_fopen(const char *filename, const char *mode) {
   int result = io_uring_register(s->ring_fd, IORING_REGISTER_FILES, &fd, 1);
   if (result < 0) {
     perror("io_uring_register_fds failed");
-    fclose(fp);
+    close(fd);
     omp_free(s, llvm_omp_target_shared_mem_alloc);
     return NULL;
   }
@@ -116,7 +96,7 @@ my_file *my_fopen(const char *filename, const char *mode) {
   my_file *mf = static_cast<my_file *>(omp_alloc(sizeof(my_file), llvm_omp_target_shared_mem_alloc));
   mf->s = s;
   mf->fi = fi;
-  mf->fp = fp;
+  mf->fd = fd;
   mf->blocks = blocks;
   mf->current_block = 0;
   mf->current_offset = 0;
@@ -179,9 +159,9 @@ void my_fclose(my_file *mf) {
     }
 
     // Close the file descriptor if open.
-    if (mf->fp) {
-        fclose(mf->fp);
-        mf->fp = NULL;
+    if (mf->fd >= 0) {
+        close(mf->fd);
+        mf->fd = -1;
     }
 
     // Free the file_info structure.
