@@ -1,20 +1,20 @@
 #include "my_io.h"
-#include <iostream>
-#include <fcntl.h>
-#include <linux/fs.h>
-#include <memory>
-#include <stdatomic.h>
-#include <stddef.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fcntl.h>
+#include <iostream>
+#include <linux/fs.h>
+#include <memory>
+#include <omp.h>
+#include <stdatomic.h>
+#include <stddef.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#include <omp.h>
 
 int io_uring_setup(unsigned entries, struct io_uring_params *p) {
   return (int)syscall(__NR_io_uring_setup, entries, p);
@@ -32,28 +32,31 @@ int io_uring_register(unsigned int fd, unsigned int opcode, const void *arg,
 }
 
 off_t get_file_size(int fd) {
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
-        perror("fstat");
-        return -1;
-    }
-    return st.st_size;
+  struct stat st;
+  if (fstat(fd, &st) < 0) {
+    perror("fstat");
+    return -1;
+  }
+  return st.st_size;
 }
 
 void update_file_size(my_file *mf) {
-    if (mf && mf->fd >= 0) {
-        off_t file_size = lseek(mf->fd, 0, SEEK_END);  // Move to end to get file size
-        if (file_size == -1) {
-            perror("lseek");
-            return;
-        }
-        mf->fi->file_sz = file_size;
-        lseek(mf->fd, 0, SEEK_SET);  // Reset the file descriptor's position to the start
+  if (mf && mf->fd >= 0) {
+    off_t file_size =
+        lseek(mf->fd, 0, SEEK_END); // Move to end to get file size
+    if (file_size == -1) {
+      perror("lseek");
+      return;
     }
+    mf->fi->file_sz = file_size;
+    lseek(mf->fd, 0,
+          SEEK_SET); // Reset the file descriptor's position to the start
+  }
 }
 
 my_file *my_fopen(const char *filename, const char *mode) {
-  struct submitter *s = static_cast<struct submitter*>(omp_alloc(sizeof(struct submitter), llvm_omp_target_shared_mem_alloc));
+  struct submitter *s = static_cast<struct submitter *>(
+      omp_alloc(sizeof(struct submitter), llvm_omp_target_shared_mem_alloc));
   struct file_info *fi;
   int flags = (strcmp(mode, "r") == 0) ? O_RDONLY : O_RDWR;
   if (app_setup_uring(s)) {
@@ -86,14 +89,17 @@ my_file *my_fopen(const char *filename, const char *mode) {
     omp_free(s, llvm_omp_target_shared_mem_alloc);
     return NULL;
   }
-  
-  fi = static_cast<struct file_info *>(omp_alloc(sizeof(*fi) + sizeof(struct iovec) * blocks, llvm_omp_target_shared_mem_alloc));
+
+  fi = static_cast<struct file_info *>(
+      omp_alloc(sizeof(*fi) + sizeof(struct iovec) * blocks,
+                llvm_omp_target_shared_mem_alloc));
   if (!fi) {
     fprintf(stderr, "Unable to allocate memory\n");
     return NULL;
   }
   fi->file_sz = file_sz;
-  my_file *mf = static_cast<my_file *>(omp_alloc(sizeof(my_file), llvm_omp_target_shared_mem_alloc));
+  my_file *mf = static_cast<my_file *>(
+      omp_alloc(sizeof(my_file), llvm_omp_target_shared_mem_alloc));
   mf->s = s;
   mf->fi = fi;
   mf->fd = fd;
@@ -150,37 +156,47 @@ my_file *my_fopen(const char *filename, const char *mode) {
     }
   }
 
+  // Update tail pointer value.
+  struct app_io_cq_ring *cring = &s->cq_ring;
+  unsigned head = *cring->head;
+  if (mf->isfirst == 0) {
+    while (head == __atomic_load_n(cring->tail, __ATOMIC_ACQUIRE)) {
+      __asm volatile("pause" ::: "memory");
+    }
+  }
+
   return mf;
 }
 
 void my_fclose(my_file *mf) {
-    if (mf == NULL) {
-        return; // If the pointer is NULL, no deallocation is needed.
-    }
+  if (mf == NULL) {
+    return; // If the pointer is NULL, no deallocation is needed.
+  }
 
-    // Close the file descriptor if open.
-    if (mf->fd >= 0) {
-        close(mf->fd);
-        mf->fd = -1;
-    }
+  // Close the file descriptor if open.
+  if (mf->fd >= 0) {
+    close(mf->fd);
+    mf->fd = -1;
+  }
 
-    // Free the file_info structure.
-    if (mf->fi) {
-        omp_free(mf->fi, llvm_omp_target_shared_mem_alloc);
-        mf->fi = NULL;
-    }
+  // Free the file_info structure.
+  if (mf->fi) {
+    omp_free(mf->fi, llvm_omp_target_shared_mem_alloc);
+    mf->fi = NULL;
+  }
 
-    // Free the submitter structure and any associated resources.
-    if (mf->s) {
-        // Continue similarly for other mmap'ed or allocated regions within submitter if any.
-        omp_free(mf->s, llvm_omp_target_shared_mem_alloc);
-        mf->s = NULL;
-    }
+  // Free the submitter structure and any associated resources.
+  if (mf->s) {
+    // Continue similarly for other mmap'ed or allocated regions within
+    // submitter if any.
+    omp_free(mf->s, llvm_omp_target_shared_mem_alloc);
+    mf->s = NULL;
+  }
 
-    // Finally, free the my_file structure itself.
-    omp_free(mf,llvm_omp_target_shared_mem_alloc);
+  // Finally, free the my_file structure itself.
+  omp_free(mf, llvm_omp_target_shared_mem_alloc);
 
-    return;
+  return;
 }
 
 int app_setup_uring(struct submitter *s) {
@@ -235,9 +251,9 @@ int app_setup_uring(struct submitter *s) {
   sring->flags = (unsigned *)((char *)sq_ptr + p.sq_off.flags);
   sring->array = (unsigned *)((char *)sq_ptr + p.sq_off.array);
 
-  s->sqes = (struct io_uring_sqe *)mmap(0, p.sq_entries * sizeof(struct io_uring_sqe),
-                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, s->ring_fd,
-                 IORING_OFF_SQES);
+  s->sqes = (struct io_uring_sqe *)mmap(
+      0, p.sq_entries * sizeof(struct io_uring_sqe), PROT_READ | PROT_WRITE,
+      MAP_SHARED | MAP_POPULATE, s->ring_fd, IORING_OFF_SQES);
   if (s->sqes == MAP_FAILED) {
     perror("mmap");
     return 1;
@@ -251,4 +267,3 @@ int app_setup_uring(struct submitter *s) {
 
   return 0;
 }
-

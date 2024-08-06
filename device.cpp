@@ -167,11 +167,6 @@ unsigned long my_fread(void *ptr, unsigned long size, unsigned long count,
   if (index >= mf->blocks)
     return 0;
 
-  if (mf->isfirst == 0) {
-    while (head == __atomic_load_n(cring->tail, __ATOMIC_ACQUIRE)) {
-      __asm volatile("pause" ::: "memory");
-    }
-  }
   do {
     read_barrier();
 
