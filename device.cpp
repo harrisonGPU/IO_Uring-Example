@@ -210,7 +210,7 @@ unsigned long my_fread(void *ptr, unsigned long size, unsigned long count,
     if (offset >= BLOCK_SZ) {
       index++;
       offset = 0; // Reset offset for the new block
-      head++;     // Move the head forward to mark this CQE as seen
+      __atomic_fetch_add(&head, 1, __ATOMIC_RELAXED);     // Move the head forward to mark this CQE as seen
     }
 
     if (bytes_read >= total_bytes) {
