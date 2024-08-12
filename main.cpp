@@ -4,10 +4,14 @@
 #include <memory>
 #include <unistd.h>
 #include <omp.h>
+#include <mutex>
 
 double perFileTime;
+std::mutex io_mutex;  // Add a mutex to protect shared resources
 
 void cat(const char *filename) {
+    std::lock_guard<std::mutex> lock(io_mutex);  // Protect the entire file operation
+
     my_file *mf = my_fopen(filename, "r");
     if (!mf) {
         perror("Failed to open file.");
